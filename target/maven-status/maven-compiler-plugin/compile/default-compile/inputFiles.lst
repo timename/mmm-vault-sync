@@ -1,7 +1,13 @@
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\SyncConfig.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\SyncEconomyProxy.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\CurrencyDefinition.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\BalanceMutationResult.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\SyncPhase.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\VaultSyncCurrencyBalanceChangeEvent.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\Lang.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\VaultSyncCurrencyService.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\MMMVaultSyncPlugin.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\VaultSyncPhaseChangeEvent.java
-E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\SyncPhase.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\BalanceStore.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\BalanceRecord.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\VaultSyncStateService.java

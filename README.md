@@ -1,47 +1,287 @@
 # MMMVaultSync
 
-Lightweight cross-server Vault balance sync for a Velocity + Paper/Purpur network.
+适用于 `Velocity + Paper/Purpur` 联机架构的跨服经济同步插件。
 
-## What it does
+当前版本：`2.0.0`
 
-- Uses MySQL as the authoritative balance store.
-- Pulls the latest balance when a player joins a backend server.
-- Detects local balance changes for online players and writes them back asynchronously.
-- Periodically refreshes online players from MySQL to pick up remote changes.
-- Avoids main-thread database access.
+## 插件定位
 
-## What it does not do
+MMMVaultSync 现在分成两部分能力：
 
-- It does not replace your existing Vault economy provider.
-- It does not magically make offline balance edits on another server instantly visible unless a player joins or the periodic refresh catches it.
-- It is designed for the common case where a player is only online on one backend server at a time.
+1. 默认货币同步
+   默认货币仍然接管你现有的 `Vault / CMI` 主经济。
+   插件使用 `MySQL` 作为跨服权威数据源，在多个子服之间同步默认货币余额。
 
-## Install
+2. 自管多货币
+   除默认货币外，插件还可以自己管理额外货币。
+   这些货币不依赖 Vault，适合你后续的交易、菜单、任务、活动等插件直接调用 API。
 
-1. Put `target/mmm-vault-sync-1.3.0.jar` into both backend servers' `plugins` folders.
-2. Start each server once so the plugin generates `plugins/MMMVaultSync/config.yml`.
-3. Set a unique `server-id` on each backend:
-   - Survival: `server-id: survival`
-   - Adventure: `server-id: adventure`
-4. Keep the same MySQL connection settings on both servers.
-5. Restart both backend servers.
+## 主要特性
 
-## Notes
+- 默认货币支持跨服同步
+- 使用 MySQL 作为权威余额存储
+- 玩家进服时拉取权威余额
+- 在线玩家默认货币变化异步回写数据库
+- 周期性拉取远端余额，处理跨服改动
+- 支持维护模式、排空、校验、安全重载
+- 支持对外暴露同步阶段信号
+- 支持插件内部自管多货币
+- 中文配置与中文提示
+- 不在主线程执行数据库 IO
 
-- Default sync table: `mmm_vault_sync_balances`
-- Commands:
-  - `/mmmvaultsync maintenance on|off`
-  - `/mmmvaultsync drain`
-  - `/mmmvaultsync verify`
-  - `/mmmvaultsync reload confirm`
-  - `/mmmvaultsync status`
-  - `/mmmvaultsync sync <player>`
-- Permission: `mmmvaultsync.admin`
+## 设计边界
 
-## Plugin API
+- 它不会替代你现有的 Vault 经济插件，只会接管同步层
+- 默认货币仍然受底层经济插件行为影响
+- 如果其他插件绕过 Vault 或绕过同步层直接改余额，维护期间仍可能造成风险
+- 跨服同步不是“绝对瞬时”，而是基于事件捕获、异步写入和周期刷新
 
-- Bukkit service: `local.mmm.vaultsync.api.VaultSyncStateService`
-- State enum: `local.mmm.vaultsync.api.SyncPhase`
-- Event: `local.mmm.vaultsync.api.VaultSyncPhaseChangeEvent`
+## 安装步骤
 
-This API is read-only by design. Other plugins can observe sync state without getting any write access to maintenance, drain, verify, or reload controls.
+1. 将 [target/mmm-vault-sync-2.0.0.jar](target/mmm-vault-sync-2.0.0.jar) 放入每个子服的 `plugins` 目录。
+2. 每个子服先启动一次，让插件自动生成配置文件。
+3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
+4. 为每个子服填写不同的 `server-id`。
+   例如：
+   - 生存服：`survival`
+   - 冒险服：`adventure`
+5. 两个子服使用同一套 MySQL 连接信息。
+6. 首次配置完成后，不需要重启整个服务器，直接执行：
+   - `/mmmvaultsync reload`
+
+## 首次加载说明
+
+如果插件第一次启动，或配置文件里仍保留默认占位值：
+
+- `server-id: server`
+- `database.password: password`
+
+插件会进入“待配置模式”：
+
+- 不连接数据库
+- 不启动同步逻辑
+- 控制台输出中文安装向导
+- 管理员玩家登录后也会收到提示
+
+你只需要改完配置后执行：
+
+```text
+/mmmvaultsync reload
+```
+
+## 配置说明
+
+主配置文件：[`src/main/resources/config.yml`](src/main/resources/config.yml)
+
+### 必填项
+
+- `server-id`
+- `database.host`
+- `database.port`
+- `database.database`
+- `database.username`
+- `database.password`
+
+### 默认货币
+
+`default-currency` 表示主货币显示配置。
+
+注意：
+
+- 默认货币实际余额仍来自 Vault 后端
+- `display-name` 和 `symbol` 主要用于插件消息提示
+- 默认货币 ID 固定为 `default`
+
+### 自管货币
+
+额外货币配置在 `currencies` 下，例如：
+
+```yml
+currencies:
+  gems:
+    display-name: 宝石
+    symbol: "◇"
+    starting-balance: 0
+    notify-on-change: true
+```
+
+说明：
+
+- `gems` 是货币 ID
+- 货币 ID 建议只使用小写英文、数字、下划线
+- 不要与 `default` 冲突
+- 这些货币完全由 MMMVaultSync 自己管理
+
+## 数据库说明
+
+默认数据表名：
+
+```text
+mmm_vault_sync_balances
+```
+
+`2.0.0` 起，表结构按下面的逻辑工作：
+
+- 主键：`(uuid, currency_id)`
+- 默认货币和自管货币统一存表
+- 旧的单货币表会自动迁移，补上 `currency_id`
+
+## 命令
+
+权限节点：
+
+```text
+mmmvaultsync.admin
+```
+
+### 基础命令
+
+```text
+/mmmvaultsync status
+/mmmvaultsync currencies
+/mmmvaultsync sync <玩家> [货币ID]
+```
+
+### 余额管理命令
+
+```text
+/mmmvaultsync balance <玩家> query [货币ID]
+/mmmvaultsync balance <玩家> set <金额> [货币ID]
+/mmmvaultsync balance <玩家> add <金额> [货币ID]
+/mmmvaultsync balance <玩家> take <金额> [货币ID]
+```
+
+说明：
+
+- 不填写货币 ID 时，默认操作 `default`
+- `default` 表示主货币
+- 其他货币 ID 表示插件自管货币
+
+### 安全维护流程
+
+```text
+/mmmvaultsync maintenance on
+/mmmvaultsync drain
+/mmmvaultsync verify
+/mmmvaultsync reload confirm
+/mmmvaultsync maintenance off
+```
+
+推荐重载流程：
+
+1. 开启维护模式
+2. 执行 `drain`
+3. 执行 `verify`
+4. 执行 `reload confirm`
+5. 关闭维护模式
+
+## 维护与安全模型
+
+### maintenance on
+
+作用：
+
+- 拒绝新的同步写入
+- 锁定默认货币的 Vault 代理操作
+- 给其他插件发出“当前不适合经济操作”的信号
+
+### drain
+
+作用：
+
+- 等待异步写入完成
+- 把在线玩家当前余额尽量刷入数据库
+
+### verify
+
+作用：
+
+- 校验在线玩家本地余额与数据库余额是否一致
+
+### reload confirm
+
+限制：
+
+- 必须先进入维护模式
+- 必须先完成 `drain`
+- 必须先完成 `verify`
+- 需要二次确认
+
+## 对外 API
+
+### 只读状态服务
+
+```text
+local.mmm.vaultsync.api.VaultSyncStateService
+```
+
+用途：
+
+- 判断插件是否处于维护模式
+- 判断是否正在排空、校验、重载
+- 供其他插件在敏感阶段暂停交易或发钱逻辑
+
+### 多货币服务
+
+```text
+local.mmm.vaultsync.api.VaultSyncCurrencyService
+```
+
+用途：
+
+- 获取默认货币 ID
+- 获取全部货币定义
+- 查询玩家余额
+- 修改自管货币或默认货币
+
+### 事件
+
+```text
+local.mmm.vaultsync.api.VaultSyncPhaseChangeEvent
+local.mmm.vaultsync.api.VaultSyncCurrencyBalanceChangeEvent
+```
+
+用途：
+
+- 监听同步阶段变化
+- 监听玩家某个货币的余额变化
+
+## 给后续插件的建议
+
+如果你以后要写玩家交易插件、任务插件、菜单插件，建议遵守这套规则：
+
+1. 在执行经济操作前先读取 `VaultSyncStateService` 或 `VaultSyncCurrencyService`
+2. 如果插件不在 `NORMAL` 阶段，就暂缓交易或资金结算
+3. 默认货币继续走 Vault 生态
+4. 新增业务货币优先直接走 MMMVaultSync 的自管多货币 API
+
+这样做的好处是：
+
+- 性能开销很小
+- 不需要高频轮询
+- 不把数据库或 PAPI 当联动主通道
+- 能明显降低交易插件和同步插件之间的冲突风险
+
+## 编译
+
+在工程目录执行：
+
+```powershell
+mvn package
+```
+
+编译产物：
+
+```text
+target/mmm-vault-sync-2.0.0.jar
+```
+
+## 当前建议
+
+正式上线前，至少做这几项测试：
+
+1. 两个子服默认货币跨服加减是否同步
+2. 玩家在 A 服发钱，B 服在线时是否会在刷新周期内看到变化
+3. 维护模式下默认货币是否会拒绝新的 Vault 改动
+4. `drain + verify + reload confirm` 整套流程是否符合预期
+5. 自管货币的 `query / add / take / set` 是否正常

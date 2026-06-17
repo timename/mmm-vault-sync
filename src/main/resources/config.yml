@@ -1,16 +1,18 @@
+# 语言文件名称
+language: ch_ZN
+
 # MMMVaultSync 配置文件
 #
-# 首次安装流程:
-# 1. 启动服务器，让插件自动生成本配置文件
-# 2. 按下面说明填写真实数据库信息和 server-id
-# 3. 修改完成后执行 /mmmvaultsync reload
-# 4. 无需重启整个服务器
+# 首次安装流程：
+# 1. 先启动一次服务器，让插件自动生成本配置文件
+# 2. 填写下方数据库信息和 server-id
+# 3. 保存后执行 /mmmvaultsync reload
+# 4. 首次配置完成后，不需要重启整个服务器
 
-# 当前后端服务器的唯一标识。
-# 不能保留为默认值 server。
-# 示例:
-#   生存服: survival
-#   冒险服: adventure
+# 当前子服唯一标识
+# 示例：
+#   survival
+#   adventure
 server-id: server
 
 database:
@@ -27,19 +29,39 @@ database:
   password: password
   # 连接池大小
   pool-size: 4
-  # 数据库连接超时，单位毫秒
+  # 连接超时，单位毫秒
   connect-timeout-millis: 5000
   # 同步数据表名
   table: mmm_vault_sync_balances
 
+# 默认货币 = Vault / CMI 主货币
+default-currency:
+  # 仅用于提示显示，不会替换 Vault 后端自身格式化规则
+  display-name: 金币
+  symbol: ""
+  # 玩家余额变化时是否发送提示
+  notify-on-change: true
+
+# 额外自管货币
+# 说明：
+# 1. 这些货币完全由 MMMVaultSync 自己管理
+# 2. 未来交易插件、菜单插件、任务插件应调用 MMMVaultSync API 操作这些货币
+# 3. 货币 id 只能用小写英文、数字、下划线，不能与 default 冲突
+currencies:
+  gems:
+    display-name: 宝石
+    symbol: "◇"
+    starting-balance: 0
+    notify-on-change: true
+
 sync:
-  # 玩家进服后，延迟多少 tick 再拉取一次权威余额
+  # 玩家进服后延迟多少 tick 再拉取一次权威余额
   join-load-delay-ticks: 10
-  # 本地余额扫描间隔，单位 tick
+  # 本地默认货币保底扫描间隔，单位 tick
   local-scan-interval-ticks: 20
-  # 远端刷新间隔，单位秒
+  # 远端数据库刷新间隔，单位秒
   remote-refresh-interval-seconds: 15
-  # 应用远端余额后，短时间内抑制回写，避免旧值抖动，单位毫秒
+  # 应用远端默认货币余额后，短时间内抑制回写，避免旧值抖动，单位毫秒
   write-suppress-millis-after-apply: 3000
   # 金额比较容差
   epsilon: 0.0001
@@ -47,5 +69,5 @@ sync:
   flush-on-quit: true
 
 logging:
-  # 是否开启调试日志
+  # 如需排查同步问题，可临时打开
   debug: false

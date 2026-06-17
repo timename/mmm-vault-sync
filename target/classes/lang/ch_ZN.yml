@@ -1,0 +1,90 @@
+prefix:
+  info: "&6[MMMVaultSync] &e"
+  warn: "&6[MMMVaultSync] &c"
+  ok: "&6[MMMVaultSync] &a"
+
+command:
+  no-permission: "你没有权限使用这个命令。"
+  usage.main: "用法: &f/mmmvaultsync reload|status|sync|maintenance|drain|verify|balance|currencies"
+  usage.sync: "用法: &f/mmmvaultsync sync <玩家> [货币ID]"
+  usage.maintenance: "用法: &f/mmmvaultsync maintenance <on|off>"
+  usage.balance: "用法: &f/mmmvaultsync balance <玩家> <query|set|add|take> [金额] [货币ID]"
+  player-offline: "目标玩家当前不在线。"
+  player-not-found: "找不到玩家 &f{player}&c。"
+  sync-requested: "已请求同步玩家 &f{player}&a 的 &f{currency}&a。"
+
+setup:
+  mode.active: "插件当前处于待配置模式，尚未连接数据库。"
+  mode.reason: "原因: &f{reason}"
+  mode.edit-config: "请先编辑 &fplugins/MMMVaultSync/config.yml"
+  mode.reload: "修改完成后执行 &f/mmmvaultsync reload"
+  mode.minimum-fields: "至少需要填写 &fserver-id、database.username、database.password"
+  reload-reading: "正在重新读取配置..."
+  incomplete: "配置仍未完成，插件继续保持待配置模式。"
+  required-fields-title: "请确认以下关键项已经填写真实值："
+  reload-failed: "配置重载失败，请检查控制台日志和数据库连接。"
+  ready: "MMMVaultSync 已完成初始化，现在开始正常工作。"
+
+status:
+  title: "MMMVaultSync 当前状态"
+  server-id: "&7- &e服务器标识: &f{server}"
+  phase: "&7- &e当前阶段: &f{phase}"
+  tracked: "&7- &e在线跟踪玩家数: &f{count}"
+  local-scan: "&7- &e本地扫描间隔: &f{ticks} tick"
+  remote-refresh: "&7- &e远端刷新间隔: &f{millis} 毫秒"
+  maintenance: "&7- &e维护模式: &f{value}"
+  drain: "&7- &edrain 状态: &f{value}"
+  verify: "&7- &everify 状态: &f{value}"
+  async: "&7- &e异步任务数: &f{count}"
+  proxy: "&7- &e经济代理层: &f{value}"
+  default-currency: "&7- &e默认货币: &f{currency}"
+  custom-currency-count: "&7- &e自管货币数量: &f{count}"
+
+reload:
+  require-maintenance: "当前禁止重载。请先开启维护模式，再依次执行 drain 和 verify。"
+  require-drain-verify: "当前禁止重载。必须满足 &fmaintenance=on&c、&fdrain=done&c、&fverify=done"
+  confirm-required: "重载需要二次确认。"
+  risk-1: "风险提示: 即使处于维护模式，仍可能有其他插件绕过同步层直接改默认货币。"
+  risk-2: "建议只在 drain 和 verify 都成功，且没有交易或发钱操作时重载。"
+  confirm-command: "请在 15 秒内执行: &f/mmmvaultsync reload confirm"
+  success: "MMMVaultSync 已重载。"
+  failed: "MMMVaultSync 重载失败，请检查控制台日志。"
+
+maintenance:
+  on: "维护模式已开启。"
+  on-detail-1: "当前已冻结新的同步写入，并锁定默认货币 Vault 操作。"
+  on-detail-2: "建议其他插件读取 VaultSyncStateService / VaultSyncCurrencyService 状态后暂停经济行为。"
+  on-next: "建议下一步执行: &f/mmmvaultsync drain &7-> &f/mmmvaultsync verify &7-> &f/mmmvaultsync reload confirm"
+  off: "维护模式已关闭。"
+
+drain:
+  require-maintenance: "当前禁止执行 drain，请先开启维护模式。"
+  start: "开始执行 drain，正在等待在途写入完成并刷新在线玩家余额到数据库..."
+  failed: "drain 执行失败，请检查控制台日志。"
+  success: "drain 执行完成。"
+
+verify:
+  require-maintenance: "当前禁止执行 verify，请先开启维护模式。"
+  require-drain: "当前禁止执行 verify，请先完成 drain。"
+  start: "开始校验在线玩家余额与 MySQL 是否一致..."
+  failed: "verify 执行失败，请检查控制台日志。"
+  failed-detail: "verify 失败: &f{detail}"
+  success: "verify 成功: &f{detail}"
+
+currency:
+  unknown: "未知货币: &f{currency}"
+  list-title: "已加载的货币列表："
+  list-entry: "&7- &f{id} &8| &e{name} &8| &7符号: &f{symbol} &8| &7类型: &f{type}"
+  write-blocked: "当前阶段不允许修改余额。请先退出维护 / 重载流程。"
+
+balance:
+  invalid-amount: "金额格式无效。"
+  query-failed: "查询玩家 &f{player}&c 的余额失败。"
+  query-result: "玩家 &f{player}&a 的 &f{currency}&a 余额为 &f{balance}"
+  change-failed: "修改玩家 &f{player}&c 的余额失败。"
+  change-failed-detail: "修改余额失败: &f{detail}"
+  change-success: "已更新玩家 &f{player}&a 的 &f{currency}&a，当前余额: &f{balance}"
+
+player:
+  balance-added: "你的 &f{currency}&e 增加了 &a{amount}&e，当前余额: &f{balance}"
+  balance-removed: "你的 &f{currency}&e 扣除了 &c{amount}&e，当前余额: &f{balance}"

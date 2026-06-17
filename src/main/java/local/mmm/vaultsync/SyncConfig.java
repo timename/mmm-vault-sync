@@ -1,6 +1,9 @@
 package local.mmm.vaultsync;
 
+import java.util.Map;
+
 public record SyncConfig(
+        String language,
         String serverId,
         String jdbcUrl,
         String username,
@@ -14,6 +17,9 @@ public record SyncConfig(
         long writeSuppressMillisAfterApply,
         double epsilon,
         boolean flushOnQuit,
-        boolean debugLogging
+        boolean debugLogging,
+        String defaultCurrencyId,
+        CurrencyDefinition defaultCurrency,
+        Map<String, CurrencyDefinition> currencies
 ) {
 }

@@ -1,34 +1,46 @@
 package local.mmm.vaultsync;
 
+import local.mmm.vaultsync.api.BalanceMutationResult;
 import local.mmm.vaultsync.api.SyncPhase;
+import local.mmm.vaultsync.api.VaultSyncCurrencyBalanceChangeEvent;
+import local.mmm.vaultsync.api.VaultSyncCurrencyService;
 import local.mmm.vaultsync.api.VaultSyncPhaseChangeEvent;
 import local.mmm.vaultsync.api.VaultSyncStateService;
 import net.milkbowl.vault.economy.Economy;
 import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.plugin.EventExecutor;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,38 +51,46 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.stream.Collectors;
 
-public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, TabCompleter, VaultSyncStateService {
+public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, TabCompleter,
+        VaultSyncStateService, VaultSyncCurrencyService {
+    public static final String DEFAULT_CURRENCY_ID = "default";
+
     private static final String ADMIN_PERMISSION = "mmmvaultsync.admin";
-    private static final List<String> SUBCOMMANDS = List.of("reload", "status", "sync", "maintenance", "drain", "verify");
+    private static final List<String> SUBCOMMANDS = List.of(
+            "reload", "status", "sync", "maintenance", "drain", "verify", "balance", "currencies"
+    );
+    private static final List<String> BALANCE_ACTIONS = List.of("query", "set", "add", "take");
     private static final long RELOAD_CONFIRM_WINDOW_MILLIS = 15_000L;
     private static final long DRAIN_WAIT_TIMEOUT_MILLIS = 15_000L;
     private static final long DRAIN_POLL_INTERVAL_MILLIS = 50L;
-    private static final String PREFIX_INFO = "\u00A76[MMMVaultSync] \u00A7e";
-    private static final String PREFIX_WARN = "\u00A76[MMMVaultSync] \u00A7c";
-    private static final String PREFIX_OK = "\u00A76[MMMVaultSync] \u00A7a";
 
     private final Map<UUID, PlayerState> states = new ConcurrentHashMap<>();
     private final Map<String, Long> pendingReloadConfirmations = new ConcurrentHashMap<>();
     private final AtomicInteger activeAsyncOperations = new AtomicInteger();
 
+    private Lang lang;
     private ExecutorService executor;
-    private Economy economy;
+    private Economy backendEconomy;
+    private SyncEconomyProxy syncEconomyProxy;
     private SyncConfig config;
     private BalanceStore store;
     private BukkitTask scanTask;
     private volatile boolean maintenanceMode;
     private volatile boolean drainCompleted;
     private volatile boolean verifyCompleted;
-    private volatile long maintenanceSinceMillis;
     private volatile long lastObservedMaintenanceChangeMillis;
     private volatile SyncPhase phase = SyncPhase.NORMAL;
     private volatile boolean setupRequired;
     private volatile String setupReason = "";
+    private volatile boolean cmiBalanceListenerRegistered;
 
     @Override
     public void onEnable() {
         boolean firstRun = !new File(getDataFolder(), "config.yml").exists();
         saveDefaultConfig();
+        saveResource("lang/ch_ZN.yml", false);
+        lang = new Lang(this);
+        lang.reload(getConfig().getString("language", "ch_ZN"));
 
         if (getCommand("mmmvaultsync") != null) {
             getCommand("mmmvaultsync").setTabCompleter(this);
@@ -93,9 +113,10 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         ensureRuntimeReady();
         if (!reloadPluginInternal(true)) {
-            throw new IllegalStateException("MMMVaultSync 配置加载失败。");
+            throw new IllegalStateException("MMMVaultSync 配置加载失败");
         }
-        registerStateServiceIfNeeded();
+        registerServicesIfNeeded();
+        registerCmiBalanceListenerIfPresent();
     }
 
     @Override
@@ -104,17 +125,19 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         try {
             flushOnlinePlayersBlocking("shutdown");
         } catch (Exception exception) {
-            getLogger().log(Level.WARNING, "插件关闭时刷新余额到数据库失败", exception);
+            getLogger().log(Level.WARNING, "插件关闭时刷新玩家余额失败", exception);
         }
+        unregisterServices();
         if (store != null) {
             store.close();
             store = null;
         }
-        getServer().getServicesManager().unregister(VaultSyncStateService.class, this);
         if (executor != null) {
             executor.shutdown();
             executor = null;
         }
+        backendEconomy = null;
+        syncEconomyProxy = null;
         states.clear();
         pendingReloadConfirmations.clear();
         phase = SyncPhase.NORMAL;
@@ -123,30 +146,27 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!sender.hasPermission(ADMIN_PERMISSION)) {
-            sender.sendMessage(PREFIX_WARN + "你没有权限使用这个命令。");
+            sender.sendMessage(lang.warn("command.no-permission", Map.of()));
             return true;
         }
 
         if (args.length == 0) {
-            sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync reload|status|sync|maintenance|drain|verify");
+            sender.sendMessage(lang.info("command.usage.main", Map.of()));
             return true;
         }
 
         if (setupRequired) {
-            String sub = args[0].toLowerCase(Locale.ROOT);
-            if ("reload".equals(sub)) {
+            if ("reload".equalsIgnoreCase(args[0])) {
                 return handleSetupReloadCommand(sender);
             }
-
-            sender.sendMessage(PREFIX_WARN + "插件当前处于待配置模式，尚未连接数据库。");
-            sender.sendMessage(PREFIX_INFO + "原因: \u00A7f" + setupReason);
-            sender.sendMessage(PREFIX_INFO + "请先修改 \u00A7fplugins/MMMVaultSync/config.yml");
-            sender.sendMessage(PREFIX_INFO + "修改完成后可执行 \u00A7f/mmmvaultsync reload");
+            sender.sendMessage(lang.warn("setup.mode.active", Map.of()));
+            sender.sendMessage(lang.info("setup.mode.reason", Map.of("reason", setupReason)));
+            sender.sendMessage(lang.info("setup.mode.edit-config", Map.of()));
+            sender.sendMessage(lang.ok("setup.mode.reload", Map.of()));
             return true;
         }
 
-        String sub = args[0].toLowerCase(Locale.ROOT);
-        return switch (sub) {
+        return switch (args[0].toLowerCase(Locale.ROOT)) {
             case "reload" -> handleReloadCommand(sender, args);
             case "status" -> {
                 sendStatus(sender);
@@ -156,8 +176,13 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             case "maintenance" -> handleMaintenanceCommand(sender, args);
             case "drain" -> handleDrainCommand(sender);
             case "verify" -> handleVerifyCommand(sender);
+            case "balance" -> handleBalanceCommand(sender, args);
+            case "currencies" -> {
+                sendCurrencies(sender);
+                yield true;
+            }
             default -> {
-                sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync reload|status|sync|maintenance|drain|verify");
+                sender.sendMessage(lang.info("command.usage.main", Map.of()));
                 yield true;
             }
         };
@@ -172,18 +197,26 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         if (args.length == 1) {
             return filterByPrefix(SUBCOMMANDS, args[0]);
         }
-        if (args.length == 2 && "sync".equalsIgnoreCase(args[0])) {
-            List<String> onlinePlayers = Bukkit.getOnlinePlayers().stream()
-                    .map(Player::getName)
-                    .sorted(String.CASE_INSENSITIVE_ORDER)
-                    .collect(Collectors.toCollection(ArrayList::new));
-            return filterByPrefix(onlinePlayers, args[1]);
-        }
         if (args.length == 2 && "maintenance".equalsIgnoreCase(args[0])) {
             return filterByPrefix(List.of("on", "off"), args[1]);
         }
         if (args.length == 2 && "reload".equalsIgnoreCase(args[0])) {
             return filterByPrefix(List.of("confirm"), args[1]);
+        }
+        if (args.length == 2 && List.of("sync", "balance").contains(args[0].toLowerCase(Locale.ROOT))) {
+            return filterByPrefix(listKnownPlayerNames(), args[1]);
+        }
+        if (args.length == 3 && "balance".equalsIgnoreCase(args[0])) {
+            return filterByPrefix(BALANCE_ACTIONS, args[2]);
+        }
+        if (args.length == 3 && "sync".equalsIgnoreCase(args[0])) {
+            return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[2]);
+        }
+        if (args.length == 4 && "balance".equalsIgnoreCase(args[0]) && "query".equalsIgnoreCase(args[2])) {
+            return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[3]);
+        }
+        if (args.length == 5 && "balance".equalsIgnoreCase(args[0])) {
+            return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[4]);
         }
         return Collections.emptyList();
     }
@@ -195,11 +228,11 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 if (!event.getPlayer().isOnline()) {
                     return;
                 }
-                event.getPlayer().sendMessage(PREFIX_WARN + "插件当前处于待配置模式。");
-                event.getPlayer().sendMessage(PREFIX_INFO + "原因: \u00A7f" + setupReason);
-                event.getPlayer().sendMessage(PREFIX_INFO + "请先编辑 \u00A7fplugins/MMMVaultSync/config.yml");
-                event.getPlayer().sendMessage(PREFIX_INFO + "至少需要填写: \u00A7fserver-id、database.username、database.password");
-                event.getPlayer().sendMessage(PREFIX_OK + "修改完成后执行: \u00A7f/mmmvaultsync reload");
+                event.getPlayer().sendMessage(lang.warn("setup.mode.active", Map.of()));
+                event.getPlayer().sendMessage(lang.info("setup.mode.reason", Map.of("reason", setupReason)));
+                event.getPlayer().sendMessage(lang.info("setup.mode.edit-config", Map.of()));
+                event.getPlayer().sendMessage(lang.info("setup.mode.minimum-fields", Map.of()));
+                event.getPlayer().sendMessage(lang.ok("setup.mode.reload", Map.of()));
             }, 40L);
         }
 
@@ -208,9 +241,12 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
 
         UUID uuid = event.getPlayer().getUniqueId();
-        states.put(uuid, new PlayerState());
+        PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
+        state.defaultState.lastObservedBalance = getBackendBalance(event.getPlayer());
         if (!maintenanceMode) {
-            Bukkit.getScheduler().runTaskLater(this, () -> scheduleAuthoritativeLoad(uuid, "join"), config.joinLoadDelayTicks());
+            Bukkit.getScheduler().runTaskLater(this,
+                    () -> scheduleAuthoritativeLoad(uuid, "join", null),
+                    config.joinLoadDelayTicks());
         }
     }
 
@@ -218,79 +254,257 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
         if (config != null && config.flushOnQuit() && !maintenanceMode) {
-            flushPlayerNow(uuid, scaled(economy.getBalance(event.getPlayer())), "quit");
+            flushPlayerNow(uuid, event.getPlayer(), "quit");
         }
         states.remove(uuid);
     }
 
+    public void afterEconomyMutation(OfflinePlayer player, EconomyResponse response, String reason) {
+        if (player == null || response == null || !response.transactionSuccess()) {
+            return;
+        }
+        BigDecimal delta = scaled(response.amount);
+        BigDecimal balance = scaled(response.balance);
+        debug("Vault 默认货币变更: 玩家=" + displayPlayer(player) + ", 原因=" + reason + ", 新余额=" + balance);
+        notifyBalanceChange(player, config.defaultCurrency(), delta, balance, reason);
+        recordDefaultBalanceChange(player, balance, reason);
+    }
+
+    @Override
+    public String getDefaultCurrencyId() {
+        return config == null ? DEFAULT_CURRENCY_ID : config.defaultCurrencyId();
+    }
+
+    @Override
+    public Map<String, CurrencyDefinition> getCurrencies() {
+        if (config == null) {
+            return Map.of(DEFAULT_CURRENCY_ID, new CurrencyDefinition(DEFAULT_CURRENCY_ID, "默认货币", "", BigDecimal.ZERO, true));
+        }
+        return config.currencies();
+    }
+
+    @Override
+    public CompletableFuture<BigDecimal> getBalanceAsync(UUID playerId, String currencyId) {
+        String normalizedCurrencyId = normalizeCurrencyId(currencyId);
+        CurrencyDefinition currency = getCurrencies().get(normalizedCurrencyId);
+        if (currency == null) {
+            return CompletableFuture.completedFuture(BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP));
+        }
+
+        Player online = Bukkit.getPlayer(playerId);
+        PlayerState state = states.get(playerId);
+        CurrencyState currencyState = state == null ? null : state.stateFor(normalizedCurrencyId);
+        if (currencyState != null && currencyState.lastObservedBalance != null) {
+            return CompletableFuture.completedFuture(currencyState.lastObservedBalance);
+        }
+        if (online != null && normalizedCurrencyId.equals(config.defaultCurrencyId())) {
+            return CompletableFuture.completedFuture(getBackendBalance(online));
+        }
+
+        return runAsync(() -> loadAuthoritativeBalance(playerId, normalizedCurrencyId));
+    }
+
+    @Override
+    public CompletableFuture<BalanceMutationResult> setBalanceAsync(UUID playerId, String currencyId, BigDecimal amount, String reason) {
+        return mutateBalanceAsync(playerId, normalizeCurrencyId(currencyId), normalizeAmount(amount), MutationType.SET, reason);
+    }
+
+    @Override
+    public CompletableFuture<BalanceMutationResult> addBalanceAsync(UUID playerId, String currencyId, BigDecimal amount, String reason) {
+        return mutateBalanceAsync(playerId, normalizeCurrencyId(currencyId), normalizeAmount(amount), MutationType.ADD, reason);
+    }
+
+    @Override
+    public CompletableFuture<BalanceMutationResult> removeBalanceAsync(UUID playerId, String currencyId, BigDecimal amount, String reason) {
+        return mutateBalanceAsync(playerId, normalizeCurrencyId(currencyId), normalizeAmount(amount), MutationType.TAKE, reason);
+    }
+
     private void sendStatus(CommandSender sender) {
-        sender.sendMessage(PREFIX_INFO + "MMMVaultSync 当前状态:");
-        sender.sendMessage("\u00A77- \u00A7e服务器标识: \u00A7f" + config.serverId());
-        sender.sendMessage("\u00A77- \u00A7e当前阶段: \u00A7f" + phaseLabel(phase));
-        sender.sendMessage("\u00A77- \u00A7e在线追踪玩家数: \u00A7f" + states.size());
-        sender.sendMessage("\u00A77- \u00A7e本地扫描间隔: \u00A7f" + config.localScanIntervalTicks() + " tick");
-        sender.sendMessage("\u00A77- \u00A7e远端刷新间隔: \u00A7f" + config.remoteRefreshIntervalMillis() + " 毫秒");
-        sender.sendMessage("\u00A77- \u00A7e维护模式: \u00A7f" + yesNo(maintenanceMode));
-        sender.sendMessage("\u00A77- \u00A7edrain 状态: \u00A7f" + yesNo(drainCompleted));
-        sender.sendMessage("\u00A77- \u00A7everify 状态: \u00A7f" + yesNo(verifyCompleted));
-        sender.sendMessage("\u00A77- \u00A7e异步任务数: \u00A7f" + activeAsyncOperations.get());
+        sender.sendMessage(lang.info("status.title", Map.of()));
+        sender.sendMessage(lang.text("status.server-id", Map.of("server", config.serverId())));
+        sender.sendMessage(lang.text("status.phase", Map.of("phase", phaseLabel(phase))));
+        sender.sendMessage(lang.text("status.tracked", Map.of("count", String.valueOf(states.size()))));
+        sender.sendMessage(lang.text("status.local-scan", Map.of("ticks", String.valueOf(config.localScanIntervalTicks()))));
+        sender.sendMessage(lang.text("status.remote-refresh", Map.of("millis", String.valueOf(config.remoteRefreshIntervalMillis()))));
+        sender.sendMessage(lang.text("status.maintenance", Map.of("value", yesNo(maintenanceMode))));
+        sender.sendMessage(lang.text("status.drain", Map.of("value", yesNo(drainCompleted))));
+        sender.sendMessage(lang.text("status.verify", Map.of("value", yesNo(verifyCompleted))));
+        sender.sendMessage(lang.text("status.async", Map.of("count", String.valueOf(activeAsyncOperations.get()))));
+        sender.sendMessage(lang.text("status.proxy", Map.of("value", syncEconomyProxy == null ? "未接管" : syncEconomyProxy.getName())));
+        sender.sendMessage(lang.text("status.default-currency", Map.of("currency", config.defaultCurrency().displayLabel())));
+        sender.sendMessage(lang.text("status.custom-currency-count", Map.of("count", String.valueOf(config.currencies().size() - 1))));
+    }
+
+    private void sendCurrencies(CommandSender sender) {
+        sender.sendMessage(lang.info("currency.list-title", Map.of()));
+        for (CurrencyDefinition currency : config.currencies().values()) {
+            sender.sendMessage(lang.text(
+                    "currency.list-entry",
+                    Map.of(
+                            "id", currency.id(),
+                            "name", currency.displayName(),
+                            "symbol", currency.symbol().isBlank() ? "-" : currency.symbol(),
+                            "type", currency.id().equals(config.defaultCurrencyId()) ? "默认" : "自管"
+                    )));
+        }
     }
 
     private boolean handleSyncCommand(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync sync <玩家名>");
+            sender.sendMessage(lang.info("command.usage.sync", Map.of()));
             return true;
         }
+
         Player player = Bukkit.getPlayerExact(args[1]);
         if (player == null) {
-            sender.sendMessage(PREFIX_WARN + "目标玩家不在线。");
+            sender.sendMessage(lang.warn("command.player-offline", Map.of()));
             return true;
         }
-        scheduleAuthoritativeLoad(player.getUniqueId(), "manual");
-        sender.sendMessage(PREFIX_OK + "已请求同步玩家 \u00A7f" + player.getName() + "\u00A7a 的余额。");
+
+        String currencyId = args.length >= 3 ? normalizeCurrencyId(args[2]) : null;
+        if (currencyId != null && !getCurrencies().containsKey(currencyId)) {
+            sender.sendMessage(lang.warn("currency.unknown", Map.of("currency", args[2])));
+            return true;
+        }
+
+        scheduleAuthoritativeLoad(player.getUniqueId(), "manual", currencyId);
+        sender.sendMessage(lang.ok("command.sync-requested", Map.of(
+                "player", player.getName(),
+                "currency", currencyId == null ? "全部货币" : currencyDisplayName(currencyId)
+        )));
+        return true;
+    }
+
+    private boolean handleBalanceCommand(CommandSender sender, String[] args) {
+        if (args.length < 3) {
+            sender.sendMessage(lang.info("command.usage.balance", Map.of()));
+            return true;
+        }
+
+        OfflinePlayer target = resolveOfflinePlayer(args[1]);
+        String action = args[2].toLowerCase(Locale.ROOT);
+        if (target == null) {
+            sender.sendMessage(lang.warn("command.player-not-found", Map.of("player", args[1])));
+            return true;
+        }
+
+        if ("query".equals(action)) {
+            String currencyId = args.length >= 4 ? normalizeCurrencyId(args[3]) : config.defaultCurrencyId();
+            CurrencyDefinition currency = getCurrencies().get(currencyId);
+            if (currency == null) {
+                sender.sendMessage(lang.warn("currency.unknown", Map.of("currency", args[3])));
+                return true;
+            }
+            getBalanceAsync(target.getUniqueId(), currencyId).whenComplete((balance, throwable) ->
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        if (throwable != null) {
+                            sender.sendMessage(lang.warn("balance.query-failed", Map.of("player", displayPlayer(target))));
+                            log(Level.WARNING, "查询余额失败: " + target.getUniqueId() + ", currency=" + currencyId, throwable);
+                            return;
+                        }
+                        sender.sendMessage(lang.ok("balance.query-result", Map.of(
+                                "player", displayPlayer(target),
+                                "currency", currency.displayLabel(),
+                                "balance", formatAmount(currency, balance)
+                        )));
+                    }));
+            return true;
+        }
+
+        if (args.length < 4) {
+            sender.sendMessage(lang.info("command.usage.balance", Map.of()));
+            return true;
+        }
+
+        BigDecimal amount = parseAmount(args[3]);
+        if (amount == null || amount.signum() < 0) {
+            sender.sendMessage(lang.warn("balance.invalid-amount", Map.of()));
+            return true;
+        }
+
+        String currencyId = args.length >= 5 ? normalizeCurrencyId(args[4]) : config.defaultCurrencyId();
+        CurrencyDefinition currency = getCurrencies().get(currencyId);
+        if (currency == null) {
+            sender.sendMessage(lang.warn("currency.unknown", Map.of("currency", currencyId)));
+            return true;
+        }
+        if (!canAcceptEconomicOperations()) {
+            sender.sendMessage(lang.warn("currency.write-blocked", Map.of()));
+            return true;
+        }
+
+        CompletableFuture<BalanceMutationResult> future = switch (action) {
+            case "set" -> setBalanceAsync(target.getUniqueId(), currencyId, amount, "admin-set:" + sender.getName());
+            case "add" -> addBalanceAsync(target.getUniqueId(), currencyId, amount, "admin-add:" + sender.getName());
+            case "take" -> removeBalanceAsync(target.getUniqueId(), currencyId, amount, "admin-take:" + sender.getName());
+            default -> null;
+        };
+
+        if (future == null) {
+            sender.sendMessage(lang.info("command.usage.balance", Map.of()));
+            return true;
+        }
+
+        future.whenComplete((result, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+            if (throwable != null) {
+                sender.sendMessage(lang.warn("balance.change-failed", Map.of("player", displayPlayer(target))));
+                log(Level.WARNING, "管理员修改余额失败: " + target.getUniqueId() + ", currency=" + currencyId, throwable);
+                return;
+            }
+            if (!result.success()) {
+                sender.sendMessage(lang.warn("balance.change-failed-detail", Map.of("detail", result.message())));
+                return;
+            }
+            sender.sendMessage(lang.ok("balance.change-success", Map.of(
+                    "player", displayPlayer(target),
+                    "currency", currency.displayLabel(),
+                    "balance", formatAmount(currency, result.newBalance())
+            )));
+        }));
         return true;
     }
 
     private boolean handleReloadCommand(CommandSender sender, String[] args) {
         if (!maintenanceMode) {
-            sender.sendMessage(PREFIX_WARN + "当前禁止重载。请先开启维护模式，再依次执行 drain 和 verify。");
+            sender.sendMessage(lang.warn("reload.require-maintenance", Map.of()));
             return true;
         }
         if (!drainCompleted || !verifyCompleted) {
-            sender.sendMessage(PREFIX_WARN + "当前禁止重载。必须满足: \u00A7fmaintenance=on\u00A7c、\u00A7fdrain=done\u00A7c、\u00A7fverify=done");
+            sender.sendMessage(lang.warn("reload.require-drain-verify", Map.of()));
             return true;
         }
         if (!isReloadConfirmed(sender, args)) {
-            sender.sendMessage(PREFIX_WARN + "重载需要二次确认。");
-            sender.sendMessage(PREFIX_INFO + "风险提示: 即使处于维护模式，其他插件仍可能绕过本同步层直接修改余额。");
-            sender.sendMessage(PREFIX_INFO + "建议: 只在 drain 和 verify 都成功、且没有玩家交易或改钱时执行重载。");
-            sender.sendMessage(PREFIX_OK + "请在 15 秒内执行: \u00A7f/mmmvaultsync reload confirm");
+            sender.sendMessage(lang.warn("reload.confirm-required", Map.of()));
+            sender.sendMessage(lang.info("reload.risk-1", Map.of()));
+            sender.sendMessage(lang.info("reload.risk-2", Map.of()));
+            sender.sendMessage(lang.ok("reload.confirm-command", Map.of()));
             return true;
         }
 
         if (reloadPluginInternal(false)) {
             drainCompleted = false;
             verifyCompleted = false;
-            sender.sendMessage(PREFIX_OK + "MMMVaultSync 已重载。");
+            sender.sendMessage(lang.ok("reload.success", Map.of()));
         } else {
-            sender.sendMessage(PREFIX_WARN + "MMMVaultSync 重载失败，请检查控制台日志。");
+            sender.sendMessage(lang.warn("reload.failed", Map.of()));
         }
         return true;
     }
 
     private boolean handleSetupReloadCommand(CommandSender sender) {
-        sender.sendMessage(PREFIX_INFO + "正在重新读取配置...");
+        sender.sendMessage(lang.info("setup.reload-reading", Map.of()));
 
         reloadConfig();
+        lang.reload(getConfig().getString("language", "ch_ZN"));
         if (isConfigUsingPlaceholders()) {
-            sender.sendMessage(PREFIX_WARN + "配置仍未完成，插件继续保持待配置模式。");
-            sender.sendMessage(PREFIX_INFO + "请确认以下关键项已经填写真实值:");
-            sender.sendMessage("\u00A77- \u00A7fserver-id");
-            sender.sendMessage("\u00A77- \u00A7fdatabase.host");
-            sender.sendMessage("\u00A77- \u00A7fdatabase.port");
-            sender.sendMessage("\u00A77- \u00A7fdatabase.database");
-            sender.sendMessage("\u00A77- \u00A7fdatabase.username");
-            sender.sendMessage("\u00A77- \u00A7fdatabase.password");
+            sender.sendMessage(lang.warn("setup.incomplete", Map.of()));
+            sender.sendMessage(lang.info("setup.required-fields-title", Map.of()));
+            sender.sendMessage("§7- §fserver-id");
+            sender.sendMessage("§7- §fdatabase.host");
+            sender.sendMessage("§7- §fdatabase.port");
+            sender.sendMessage("§7- §fdatabase.database");
+            sender.sendMessage("§7- §fdatabase.username");
+            sender.sendMessage("§7- §fdatabase.password");
             printConfigPlaceholderNotice();
             return true;
         }
@@ -301,18 +515,19 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         if (!reloadPluginInternal(true)) {
             setupRequired = true;
             setupReason = "配置已修改，但数据库连接或初始化仍然失败";
-            sender.sendMessage(PREFIX_WARN + "配置重新加载失败，请检查控制台日志和数据库连接配置。");
+            sender.sendMessage(lang.warn("setup.reload-failed", Map.of()));
             return true;
         }
 
-        registerStateServiceIfNeeded();
-        sender.sendMessage(PREFIX_OK + "MMMVaultSync 已完成初始化，现在开始正常工作。");
+        registerServicesIfNeeded();
+        registerCmiBalanceListenerIfPresent();
+        sender.sendMessage(lang.ok("setup.ready", Map.of()));
         return true;
     }
 
     private boolean handleMaintenanceCommand(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync maintenance <on|off>");
+            sender.sendMessage(lang.info("command.usage.maintenance", Map.of()));
             return true;
         }
 
@@ -320,14 +535,13 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             maintenanceMode = true;
             drainCompleted = false;
             verifyCompleted = false;
-            maintenanceSinceMillis = System.currentTimeMillis();
-            lastObservedMaintenanceChangeMillis = maintenanceSinceMillis;
+            lastObservedMaintenanceChangeMillis = System.currentTimeMillis();
             pendingReloadConfirmations.clear();
             setPhase(SyncPhase.MAINTENANCE);
-            sender.sendMessage(PREFIX_OK + "维护模式已开启。");
-            sender.sendMessage(PREFIX_INFO + "当前已冻结同步写入和远端定时刷新。");
-            sender.sendMessage(PREFIX_INFO + "注意: 本插件无法绝对阻止其他插件直接修改余额。");
-            sender.sendMessage(PREFIX_OK + "建议下一步执行: \u00A7f/mmmvaultsync drain \u00A77-> \u00A7f/mmmvaultsync verify \u00A77-> \u00A7f/mmmvaultsync reload confirm");
+            sender.sendMessage(lang.ok("maintenance.on", Map.of()));
+            sender.sendMessage(lang.info("maintenance.on-detail-1", Map.of()));
+            sender.sendMessage(lang.info("maintenance.on-detail-2", Map.of()));
+            sender.sendMessage(lang.ok("maintenance.on-next", Map.of()));
             return true;
         }
 
@@ -337,30 +551,30 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             verifyCompleted = false;
             pendingReloadConfirmations.clear();
             setPhase(SyncPhase.NORMAL);
-            sender.sendMessage(PREFIX_OK + "维护模式已关闭。");
+            sender.sendMessage(lang.ok("maintenance.off", Map.of()));
             for (Player player : Bukkit.getOnlinePlayers()) {
-                scheduleAuthoritativeLoad(player.getUniqueId(), "maintenance-off");
+                scheduleAuthoritativeLoad(player.getUniqueId(), "maintenance-off", null);
             }
             return true;
         }
 
-        sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync maintenance <on|off>");
+        sender.sendMessage(lang.info("command.usage.maintenance", Map.of()));
         return true;
     }
 
     private boolean handleDrainCommand(CommandSender sender) {
         if (!maintenanceMode) {
-            sender.sendMessage(PREFIX_WARN + "当前禁止执行 drain，请先开启维护模式。");
+            sender.sendMessage(lang.warn("drain.require-maintenance", Map.of()));
             return true;
         }
 
-        sender.sendMessage(PREFIX_INFO + "开始执行 drain，正在等待在途任务完成并刷新在线玩家余额到数据库...");
+        sender.sendMessage(lang.info("drain.start", Map.of()));
         setPhase(SyncPhase.DRAINING);
         runAsync(this::performDrain).whenComplete((success, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
             if (throwable != null || !Boolean.TRUE.equals(success)) {
                 drainCompleted = false;
                 setPhase(SyncPhase.MAINTENANCE);
-                sender.sendMessage(PREFIX_WARN + "drain 执行失败，请检查控制台日志。");
+                sender.sendMessage(lang.warn("drain.failed", Map.of()));
                 if (throwable != null) {
                     log(Level.WARNING, "drain 执行失败", throwable);
                 }
@@ -369,40 +583,40 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             drainCompleted = true;
             verifyCompleted = false;
             setPhase(SyncPhase.MAINTENANCE);
-            sender.sendMessage(PREFIX_OK + "drain 执行完成。");
+            sender.sendMessage(lang.ok("drain.success", Map.of()));
         }));
         return true;
     }
 
     private boolean handleVerifyCommand(CommandSender sender) {
         if (!maintenanceMode) {
-            sender.sendMessage(PREFIX_WARN + "当前禁止执行 verify，请先开启维护模式。");
+            sender.sendMessage(lang.warn("verify.require-maintenance", Map.of()));
             return true;
         }
         if (!drainCompleted) {
-            sender.sendMessage(PREFIX_WARN + "当前禁止执行 verify，请先完成 drain。");
+            sender.sendMessage(lang.warn("verify.require-drain", Map.of()));
             return true;
         }
 
-        sender.sendMessage(PREFIX_INFO + "开始校验在线玩家余额与 MySQL 是否一致...");
+        sender.sendMessage(lang.info("verify.start", Map.of()));
         setPhase(SyncPhase.VERIFYING);
         runAsync(this::performVerify).whenComplete((result, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
             if (throwable != null) {
                 verifyCompleted = false;
                 setPhase(SyncPhase.MAINTENANCE);
-                sender.sendMessage(PREFIX_WARN + "verify 执行失败，请检查控制台日志。");
+                sender.sendMessage(lang.warn("verify.failed", Map.of()));
                 log(Level.WARNING, "verify 执行失败", throwable);
                 return;
             }
             if (!result.ok()) {
                 verifyCompleted = false;
                 setPhase(SyncPhase.MAINTENANCE);
-                sender.sendMessage(PREFIX_WARN + "verify 失败: \u00A7f" + result.message());
+                sender.sendMessage(lang.warn("verify.failed-detail", Map.of("detail", result.message())));
                 return;
             }
             verifyCompleted = true;
             setPhase(SyncPhase.MAINTENANCE);
-            sender.sendMessage(PREFIX_OK + "verify 成功: \u00A7f" + result.message());
+            sender.sendMessage(lang.ok("verify.success", Map.of("detail", result.message())));
         }));
         return true;
     }
@@ -411,13 +625,11 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         SyncPhase previousPhase = phase;
         if (!startup) {
             setPhase(SyncPhase.RELOADING);
-        }
-        if (!startup) {
             stopScanTask();
             try {
                 flushOnlinePlayersBlocking("reload");
             } catch (Exception exception) {
-                getLogger().log(Level.SEVERE, "重载前刷新在线玩家余额失败", exception);
+                getLogger().log(Level.SEVERE, "重载前刷新玩家余额失败", exception);
                 setPhase(previousPhase);
                 restartScanTask();
                 return false;
@@ -436,7 +648,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             if (oldStore != null) {
                 this.store = oldStore;
             }
-            getLogger().log(Level.SEVERE, "初始化同步数据库表结构失败", exception);
+            getLogger().log(Level.SEVERE, "初始化同步数据库表失败", exception);
             if (!startup) {
                 setPhase(previousPhase);
                 restartScanTask();
@@ -446,10 +658,12 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         this.config = newConfig;
         this.store = newStore;
+        lang.reload(newConfig.language());
         if (oldStore != null) {
             oldStore.close();
         }
 
+        ensureEconomyProxyRegistered();
         resyncTrackedPlayersAfterReload();
         restartScanTask();
         setPhase(maintenanceMode ? SyncPhase.MAINTENANCE : SyncPhase.NORMAL);
@@ -462,7 +676,41 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         String database = getConfig().getString("database.database", "minecraft");
         String jdbcUrl = "jdbc:mysql://" + host + ":" + port + "/" + database
                 + "?useSSL=false&autoReconnect=true&useUnicode=true&characterEncoding=UTF-8";
+
+        CurrencyDefinition defaultCurrency = new CurrencyDefinition(
+                DEFAULT_CURRENCY_ID,
+                getConfig().getString("default-currency.display-name", "金币"),
+                getConfig().getString("default-currency.symbol", ""),
+                normalizeAmount(BigDecimal.ZERO),
+                getConfig().getBoolean("default-currency.notify-on-change", true)
+        );
+
+        Map<String, CurrencyDefinition> currencies = new LinkedHashMap<>();
+        currencies.put(defaultCurrency.id(), defaultCurrency);
+
+        ConfigurationSection currenciesSection = getConfig().getConfigurationSection("currencies");
+        if (currenciesSection != null) {
+            for (String id : currenciesSection.getKeys(false)) {
+                String normalizedId = normalizeCurrencyId(id);
+                if (DEFAULT_CURRENCY_ID.equals(normalizedId)) {
+                    continue;
+                }
+                ConfigurationSection section = currenciesSection.getConfigurationSection(id);
+                if (section == null) {
+                    continue;
+                }
+                currencies.put(normalizedId, new CurrencyDefinition(
+                        normalizedId,
+                        section.getString("display-name", normalizedId),
+                        section.getString("symbol", ""),
+                        normalizeAmount(BigDecimal.valueOf(section.getDouble("starting-balance", 0.0D))),
+                        section.getBoolean("notify-on-change", true)
+                ));
+            }
+        }
+
         return new SyncConfig(
+                getConfig().getString("language", "ch_ZN"),
                 getConfig().getString("server-id", "server"),
                 jdbcUrl,
                 getConfig().getString("database.username", "root"),
@@ -476,7 +724,10 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 Math.max(0L, getConfig().getLong("sync.write-suppress-millis-after-apply", 3000L)),
                 Math.max(0.0D, getConfig().getDouble("sync.epsilon", 0.0001D)),
                 getConfig().getBoolean("sync.flush-on-quit", true),
-                getConfig().getBoolean("logging.debug", false)
+                getConfig().getBoolean("logging.debug", false),
+                DEFAULT_CURRENCY_ID,
+                defaultCurrency,
+                Collections.unmodifiableMap(currencies)
         );
     }
 
@@ -485,74 +736,95 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         for (Player player : Bukkit.getOnlinePlayers()) {
             UUID uuid = player.getUniqueId();
             PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
-            BigDecimal observed = scaled(economy.getBalance(player));
+            CurrencyState defaultState = state.defaultState;
+            BigDecimal observed = getBackendBalance(player);
 
-            if (state.lastObservedBalance == null) {
-                state.lastObservedBalance = observed;
+            if (defaultState.lastObservedBalance == null) {
+                defaultState.lastObservedBalance = observed;
             }
 
             if (maintenanceMode) {
-                if (!sameBalance(observed, state.lastObservedBalance)) {
+                if (!sameBalance(observed, defaultState.lastObservedBalance)) {
                     lastObservedMaintenanceChangeMillis = now;
                     drainCompleted = false;
                     verifyCompleted = false;
-                    debug("维护模式期间检测到余额变化: " + player.getName() + " " + state.lastObservedBalance + " -> " + observed);
+                    debug("维护模式期间检测到默认货币变化: " + player.getName()
+                            + " " + defaultState.lastObservedBalance + " -> " + observed);
                 }
-                state.lastObservedBalance = observed;
+                defaultState.lastObservedBalance = observed;
                 continue;
             }
 
-            if (!state.writeInFlight && now >= state.suppressWritesUntilMillis && !sameBalance(observed, state.lastObservedBalance)) {
-                state.lastObservedBalance = observed;
-                scheduleWrite(uuid, observed, state, "local-change");
+            if (!defaultState.writeInFlight
+                    && now >= defaultState.suppressWritesUntilMillis
+                    && !sameBalance(observed, defaultState.lastObservedBalance)) {
+                defaultState.lastObservedBalance = observed;
+                scheduleWrite(uuid, config.defaultCurrencyId(), observed, defaultState, "scan-local-change");
             } else {
-                state.lastObservedBalance = observed;
+                defaultState.lastObservedBalance = observed;
             }
 
-            if (!state.remoteLoadInFlight && now >= state.nextRemoteRefreshMillis) {
-                state.nextRemoteRefreshMillis = now + config.remoteRefreshIntervalMillis();
-                scheduleAuthoritativeLoad(uuid, "periodic");
+            if (!defaultState.remoteLoadInFlight && now >= defaultState.nextRemoteRefreshMillis) {
+                defaultState.nextRemoteRefreshMillis = now + config.remoteRefreshIntervalMillis();
+                scheduleAuthoritativeLoad(uuid, "periodic", null);
             }
         }
     }
 
-    private void scheduleAuthoritativeLoad(UUID uuid, String reason) {
+    private void scheduleAuthoritativeLoad(UUID uuid, String reason, String targetCurrencyId) {
         if (maintenanceMode && !"manual".equals(reason) && !"reload".equals(reason) && !"maintenance-off".equals(reason)) {
             return;
         }
 
         PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
-        if (state.remoteLoadInFlight) {
+        CurrencyState gateState = state.stateFor(targetCurrencyId == null ? config.defaultCurrencyId() : targetCurrencyId);
+        if (gateState.remoteLoadInFlight) {
             return;
         }
-        state.remoteLoadInFlight = true;
+        gateState.remoteLoadInFlight = true;
+        debug("开始远端拉取: uuid=" + uuid + ", reason=" + reason + ", currency=" + (targetCurrencyId == null ? "ALL" : targetCurrencyId));
 
-        runAsync(() -> store.load(uuid)).whenComplete((record, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
-            state.remoteLoadInFlight = false;
+        runAsync(() -> targetCurrencyId == null ? store.loadAll(uuid) : Map.of(
+                targetCurrencyId,
+                store.load(uuid, targetCurrencyId).orElse(null)
+        )).whenComplete((records, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+            gateState.remoteLoadInFlight = false;
             if (throwable != null) {
                 log(Level.WARNING, "加载玩家权威余额失败: " + uuid + " (" + reason + ")", throwable);
                 return;
             }
 
-            Player player = Bukkit.getPlayer(uuid);
-            if (player == null || !player.isOnline()) {
-                return;
+            OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(uuid);
+            Player onlinePlayer = Bukkit.getPlayer(uuid);
+            Map<String, BalanceRecord> nonNullRecords = new LinkedHashMap<>();
+            for (Map.Entry<String, BalanceRecord> entry : records.entrySet()) {
+                if (entry.getValue() != null) {
+                    nonNullRecords.put(entry.getKey(), entry.getValue());
+                }
             }
 
-            if (record.isPresent()) {
-                BalanceRecord authoritative = record.get();
-                if (authoritative.revision() > state.knownRevision || "join".equals(reason) || "manual".equals(reason)) {
-                    applyAuthoritativeBalance(player, state, authoritative, reason);
+            if (targetCurrencyId == null || config.defaultCurrencyId().equals(targetCurrencyId)) {
+                BalanceRecord defaultRecord = nonNullRecords.get(config.defaultCurrencyId());
+                if (defaultRecord != null && onlinePlayer != null && onlinePlayer.isOnline()) {
+                    applyAuthoritativeDefaultBalance(onlinePlayer, state.defaultState, defaultRecord, reason);
+                } else if (defaultRecord == null && !maintenanceMode && onlinePlayer != null && onlinePlayer.isOnline()) {
+                    BigDecimal localBalance = getBackendBalance(onlinePlayer);
+                    scheduleWrite(uuid, config.defaultCurrencyId(), localBalance, state.defaultState, "seed-" + reason);
                 }
-            } else if (!maintenanceMode) {
-                BigDecimal localBalance = scaled(economy.getBalance(player));
-                scheduleWrite(uuid, localBalance, state, "seed-" + reason);
+            }
+
+            for (Map.Entry<String, BalanceRecord> entry : nonNullRecords.entrySet()) {
+                if (config.defaultCurrencyId().equals(entry.getKey())) {
+                    continue;
+                }
+                applyManagedCurrencyRecord(offlinePlayer, state, entry.getValue(), reason);
             }
         }));
     }
 
-    private void applyAuthoritativeBalance(Player player, PlayerState state, BalanceRecord record, String reason) {
-        BigDecimal current = scaled(economy.getBalance(player));
+    private void applyAuthoritativeDefaultBalance(Player player, CurrencyState state, BalanceRecord record, String reason) {
+        BigDecimal current = getBackendBalance(player);
+        BigDecimal previous = state.lastObservedBalance == null ? current : state.lastObservedBalance;
         if (sameBalance(current, record.balance())) {
             state.knownRevision = Math.max(state.knownRevision, record.revision());
             state.lastObservedBalance = record.balance();
@@ -561,26 +833,45 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         BigDecimal delta = record.balance().subtract(current);
         EconomyResponse response = delta.signum() >= 0
-                ? economy.depositPlayer(player, delta.doubleValue())
-                : economy.withdrawPlayer(player, delta.abs().doubleValue());
-
+                ? backendEconomy.depositPlayer(player, delta.doubleValue())
+                : backendEconomy.withdrawPlayer(player, delta.abs().doubleValue());
         if (!response.transactionSuccess()) {
-            getLogger().warning("应用玩家权威余额失败: " + player.getName()
-                    + "，触发原因=" + reason + "，错误=" + response.errorMessage);
+            getLogger().warning("应用默认货币权威余额失败: " + player.getName() + ", reason=" + reason + ", error=" + response.errorMessage);
             return;
         }
 
         state.suppressWritesUntilMillis = System.currentTimeMillis() + config.writeSuppressMillisAfterApply();
         state.knownRevision = Math.max(state.knownRevision, record.revision());
         state.lastObservedBalance = record.balance();
-        debug("已应用远端余额: " + player.getName() + " " + current + " -> " + record.balance() + " (" + reason + ")");
+        notifyRemoteChangeIfNeeded(player, config.defaultCurrency(), previous, record.balance(), reason);
+        fireBalanceChangeEvent(player.getUniqueId(), config.defaultCurrencyId(), previous, record.balance(), reason, true);
     }
 
-    private void scheduleWrite(UUID uuid, BigDecimal balance, PlayerState state, String reason) {
+    private void applyManagedCurrencyRecord(OfflinePlayer player, PlayerState state, BalanceRecord record, String reason) {
+        CurrencyDefinition currency = getCurrencies().get(record.currencyId());
+        if (currency == null) {
+            return;
+        }
+
+        CurrencyState currencyState = state.stateFor(record.currencyId());
+        BigDecimal previous = currencyState.lastObservedBalance == null
+                ? currency.normalizedStartingBalance()
+                : currencyState.lastObservedBalance;
+        if (currencyState.knownRevision >= record.revision() && !currencyState.remoteLoadInFlight) {
+            return;
+        }
+
+        currencyState.knownRevision = Math.max(currencyState.knownRevision, record.revision());
+        currencyState.lastObservedBalance = record.balance();
+        notifyRemoteChangeIfNeeded(player, currency, previous, record.balance(), reason);
+        fireBalanceChangeEvent(player.getUniqueId(), currency.id(), previous, record.balance(), reason, true);
+    }
+
+    private void scheduleWrite(UUID uuid, String currencyId, BigDecimal balance, CurrencyState state, String reason) {
         if (maintenanceMode) {
             drainCompleted = false;
             verifyCompleted = false;
-            debug("维护模式期间跳过写入: " + uuid + " (" + reason + ")");
+            debug("维护模式期间跳过写入: " + uuid + ", currency=" + currencyId + ", reason=" + reason);
             return;
         }
 
@@ -588,86 +879,140 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             state.pendingWriteBalance = balance;
             return;
         }
+
         state.writeInFlight = true;
         long knownRevisionSnapshot = state.knownRevision;
-
-        runAsync(() -> store.writeSnapshot(uuid, balance, knownRevisionSnapshot, config.serverId()))
+        runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, knownRevisionSnapshot, config.serverId()))
                 .whenComplete((record, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
                     state.writeInFlight = false;
                     if (throwable != null) {
-                        log(Level.WARNING, "写入玩家余额失败: " + uuid + " (" + reason + ")", throwable);
+                        log(Level.WARNING, "写入玩家余额失败: " + uuid + ", currency=" + currencyId + ", reason=" + reason, throwable);
                     } else if (record != null) {
                         state.knownRevision = Math.max(state.knownRevision, record.revision());
-                        debug("已写入余额: " + uuid + " " + record.balance() + " rev=" + record.revision() + " (" + reason + ")");
+                        state.lastObservedBalance = record.balance();
                     }
 
                     if (state.pendingWriteBalance != null) {
                         BigDecimal pending = state.pendingWriteBalance;
                         state.pendingWriteBalance = null;
-                        if (!sameBalance(pending, state.lastObservedBalance)) {
-                            state.lastObservedBalance = pending;
-                        }
-                        scheduleWrite(uuid, pending, state, "pending");
+                        scheduleWrite(uuid, currencyId, pending, state, "pending");
                     }
                 }));
     }
 
-    private void flushPlayerNow(UUID uuid, BigDecimal balance, String reason) {
-        PlayerState state = states.get(uuid);
-        long knownRevision = state == null ? 0L : state.knownRevision;
-        runAsync(() -> store.writeSnapshot(uuid, balance, knownRevision, config.serverId()))
+    private void flushPlayerNow(UUID uuid, OfflinePlayer player, String reason) {
+        if (store == null) {
+            return;
+        }
+
+        PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
+        BigDecimal defaultBalance = player.isOnline() && player instanceof Player online
+                ? getBackendBalance(online)
+                : state.defaultState.lastObservedBalance;
+        if (defaultBalance == null) {
+            defaultBalance = BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
+        }
+
+        long defaultRevision = state.defaultState.knownRevision;
+        BigDecimal defaultSnapshot = defaultBalance;
+        runAsync(() -> store.writeSnapshot(uuid, config.defaultCurrencyId(), defaultSnapshot, defaultRevision, config.serverId()))
                 .exceptionally(throwable -> {
-                    log(Level.WARNING, "刷新玩家余额失败: " + uuid + " (" + reason + ")", throwable);
+                    log(Level.WARNING, "刷新默认货币失败: " + uuid + ", reason=" + reason, throwable);
                     return null;
                 });
+
+        for (Map.Entry<String, CurrencyState> entry : state.managedStates.entrySet()) {
+            CurrencyState currencyState = entry.getValue();
+            if (currencyState.lastObservedBalance == null) {
+                continue;
+            }
+            long revision = currencyState.knownRevision;
+            BigDecimal balance = currencyState.lastObservedBalance;
+            String currencyId = entry.getKey();
+            runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, revision, config.serverId()))
+                    .exceptionally(throwable -> {
+                        log(Level.WARNING, "刷新自管货币失败: " + uuid + ", currency=" + currencyId + ", reason=" + reason, throwable);
+                        return null;
+                    });
+        }
     }
 
     private void flushOnlinePlayersBlocking(String reason) {
-        if (store == null || economy == null) {
+        if (store == null || config == null) {
             return;
         }
 
         List<CompletableFuture<BalanceRecord>> futures = new ArrayList<>();
-        for (Player player : Bukkit.getOnlinePlayers()) {
+        for (OfflinePlayer player : collectKnownPlayers()) {
             UUID uuid = player.getUniqueId();
-            PlayerState state = states.get(uuid);
-            long knownRevision = state == null ? 0L : state.knownRevision;
-            BigDecimal balance = scaled(economy.getBalance(player));
-            futures.add(runAsync(() -> store.writeSnapshot(uuid, balance, knownRevision, config.serverId())));
+            PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
+            BigDecimal defaultBalance = player.isOnline() && player instanceof Player online
+                    ? getBackendBalance(online)
+                    : state.defaultState.lastObservedBalance;
+            if (defaultBalance != null) {
+                long knownRevision = state.defaultState.knownRevision;
+                BigDecimal snapshotBalance = defaultBalance;
+                futures.add(runAsync(() -> store.writeSnapshot(uuid, config.defaultCurrencyId(), snapshotBalance, knownRevision, config.serverId())));
+            }
+
+            for (Map.Entry<String, CurrencyState> entry : state.managedStates.entrySet()) {
+                if (entry.getValue().lastObservedBalance == null) {
+                    continue;
+                }
+                String currencyId = entry.getKey();
+                BigDecimal balance = entry.getValue().lastObservedBalance;
+                long revision = entry.getValue().knownRevision;
+                futures.add(runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, revision, config.serverId())));
+            }
         }
 
         for (CompletableFuture<BalanceRecord> future : futures) {
             future.join();
         }
+        debug("已完成阻塞刷盘: " + reason);
     }
 
     private void resyncTrackedPlayersAfterReload() {
-        if (economy == null || config == null) {
+        if (config == null) {
             return;
         }
 
-        states.keySet().retainAll(Bukkit.getOnlinePlayers().stream()
+        Set<UUID> onlinePlayers = Bukkit.getOnlinePlayers().stream()
                 .map(Player::getUniqueId)
-                .collect(Collectors.toSet()));
+                .collect(Collectors.toSet());
+        states.keySet().retainAll(onlinePlayers);
 
         for (Player player : Bukkit.getOnlinePlayers()) {
             UUID uuid = player.getUniqueId();
             PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
-            state.lastObservedBalance = scaled(economy.getBalance(player));
-            state.pendingWriteBalance = null;
-            state.writeInFlight = false;
-            state.remoteLoadInFlight = false;
-            state.suppressWritesUntilMillis = 0L;
-            state.nextRemoteRefreshMillis = 0L;
-            Bukkit.getScheduler().runTaskLater(this, () -> scheduleAuthoritativeLoad(uuid, "reload"), config.joinLoadDelayTicks());
+            state.defaultState.lastObservedBalance = getBackendBalance(player);
+            state.defaultState.pendingWriteBalance = null;
+            state.defaultState.writeInFlight = false;
+            state.defaultState.remoteLoadInFlight = false;
+            state.defaultState.suppressWritesUntilMillis = 0L;
+            state.defaultState.nextRemoteRefreshMillis = 0L;
+            for (CurrencyState managedState : state.managedStates.values()) {
+                managedState.pendingWriteBalance = null;
+                managedState.writeInFlight = false;
+                managedState.remoteLoadInFlight = false;
+                managedState.suppressWritesUntilMillis = 0L;
+                managedState.nextRemoteRefreshMillis = 0L;
+            }
+            Bukkit.getScheduler().runTaskLater(this,
+                    () -> scheduleAuthoritativeLoad(uuid, "reload", null),
+                    config.joinLoadDelayTicks());
         }
     }
 
     private void restartScanTask() {
         stopScanTask();
         if (config != null) {
-            scanTask = Bukkit.getScheduler().runTaskTimer(this, this::scanOnlinePlayers,
-                    config.localScanIntervalTicks(), config.localScanIntervalTicks());
+            scanTask = Bukkit.getScheduler().runTaskTimer(
+                    this,
+                    this::scanOnlinePlayers,
+                    config.localScanIntervalTicks(),
+                    config.localScanIntervalTicks()
+            );
         }
     }
 
@@ -724,21 +1069,35 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         for (Player player : Bukkit.getOnlinePlayers()) {
             UUID uuid = player.getUniqueId();
-            BigDecimal localBalance = scaled(economy.getBalance(player));
-            Optional<BalanceRecord> record = store.load(uuid);
-            if (record.isEmpty()) {
-                return new VerifyResult(false, "玩家 " + player.getName() + " 在数据库中缺少余额记录");
+            PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
+            BigDecimal localDefaultBalance = getBackendBalance(player);
+            BigDecimal dbDefaultBalance = loadAuthoritativeBalance(uuid, config.defaultCurrencyId());
+            if (!sameBalance(localDefaultBalance, dbDefaultBalance)) {
+                return new VerifyResult(false, "玩家 " + player.getName() + " 的默认货币不一致，本地="
+                        + localDefaultBalance + "，数据库=" + dbDefaultBalance);
             }
-            if (!sameBalance(localBalance, record.get().balance())) {
-                return new VerifyResult(false, "玩家 " + player.getName()
-                        + " 的余额不一致，本地=" + localBalance + "，数据库=" + record.get().balance());
+
+            for (Map.Entry<String, CurrencyDefinition> entry : config.currencies().entrySet()) {
+                String currencyId = entry.getKey();
+                if (config.defaultCurrencyId().equals(currencyId)) {
+                    continue;
+                }
+                CurrencyState currencyState = state.stateFor(currencyId);
+                BigDecimal localManaged = currencyState.lastObservedBalance == null
+                        ? entry.getValue().normalizedStartingBalance()
+                        : currencyState.lastObservedBalance;
+                BigDecimal dbManaged = loadAuthoritativeBalance(uuid, currencyId);
+                if (!sameBalance(localManaged, dbManaged)) {
+                    return new VerifyResult(false, "玩家 " + player.getName() + " 的货币 " + currencyId
+                            + " 不一致，本地=" + localManaged + "，数据库=" + dbManaged);
+                }
             }
         }
 
         if (lastObservedMaintenanceChangeMillis > verifyStartedAt || activeAsyncOperations.get() > 0) {
             return new VerifyResult(false, "校验期间检测到新的余额活动");
         }
-        return new VerifyResult(true, "所有在线玩家余额都与 MySQL 一致");
+        return new VerifyResult(true, "在线玩家余额与 MySQL 一致");
     }
 
     private void waitForInFlightTasks() throws InterruptedException {
@@ -752,24 +1111,344 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private void ensureRuntimeReady() {
-        if (economy == null) {
-            RegisteredServiceProvider<Economy> provider = getServer().getServicesManager().getRegistration(Economy.class);
-            if (provider == null || provider.getProvider() == null) {
-                throw new IllegalStateException("未找到可用的 Vault 经济提供者。");
+        if (backendEconomy == null) {
+            Economy resolved = resolveBackendEconomy();
+            if (resolved == null) {
+                throw new IllegalStateException("未找到可用的 Vault 经济提供者");
             }
-            economy = provider.getProvider();
+            backendEconomy = resolved;
         }
         if (executor == null || executor.isShutdown()) {
             executor = Executors.newFixedThreadPool(2, new SyncThreadFactory());
         }
     }
 
-    private void registerStateServiceIfNeeded() {
-        RegisteredServiceProvider<VaultSyncStateService> registration =
+    private Economy resolveBackendEconomy() {
+        RegisteredServiceProvider<Economy> provider = getServer().getServicesManager().getRegistration(Economy.class);
+        if (provider == null || provider.getProvider() == null) {
+            return null;
+        }
+        Economy candidate = provider.getProvider();
+        if (candidate instanceof SyncEconomyProxy proxy) {
+            return proxy.delegate();
+        }
+        return candidate;
+    }
+
+    private void ensureEconomyProxyRegistered() {
+        if (backendEconomy == null) {
+            throw new IllegalStateException("经济后端尚未初始化");
+        }
+        if (syncEconomyProxy == null || syncEconomyProxy.delegate() != backendEconomy) {
+            syncEconomyProxy = new SyncEconomyProxy(this, backendEconomy);
+        }
+        getServer().getServicesManager().unregister(Economy.class, this);
+        getServer().getServicesManager().register(Economy.class, syncEconomyProxy, this, ServicePriority.Highest);
+        debug("已注册 Vault 经济代理层，后端提供者: " + backendEconomy.getName());
+    }
+
+    private void registerServicesIfNeeded() {
+        RegisteredServiceProvider<VaultSyncStateService> stateRegistration =
                 getServer().getServicesManager().getRegistration(VaultSyncStateService.class);
-        if (registration == null || registration.getProvider() != this) {
+        if (stateRegistration == null || stateRegistration.getProvider() != this) {
             getServer().getServicesManager().register(VaultSyncStateService.class, this, this, ServicePriority.Normal);
         }
+
+        RegisteredServiceProvider<VaultSyncCurrencyService> currencyRegistration =
+                getServer().getServicesManager().getRegistration(VaultSyncCurrencyService.class);
+        if (currencyRegistration == null || currencyRegistration.getProvider() != this) {
+            getServer().getServicesManager().register(VaultSyncCurrencyService.class, this, this, ServicePriority.Normal);
+        }
+    }
+
+    private void unregisterServices() {
+        getServer().getServicesManager().unregister(Economy.class, this);
+        getServer().getServicesManager().unregister(VaultSyncStateService.class, this);
+        getServer().getServicesManager().unregister(VaultSyncCurrencyService.class, this);
+    }
+
+    private void registerCmiBalanceListenerIfPresent() {
+        if (cmiBalanceListenerRegistered) {
+            return;
+        }
+        Plugin cmi = Bukkit.getPluginManager().getPlugin("CMI");
+        if (cmi == null || !cmi.isEnabled()) {
+            return;
+        }
+
+        try {
+            Class<?> eventClass = Class.forName("com.Zrips.CMI.events.CMIUserBalanceChangeEvent");
+            Method getUserMethod = eventClass.getMethod("getUser");
+            Method getHandlersMethod = eventClass.getMethod("getHandlerList");
+
+            EventExecutor executor = (listener, event) -> handleCmiBalanceChange(event, eventClass, getUserMethod);
+            Bukkit.getPluginManager().registerEvent(
+                    eventClass.asSubclass(Event.class),
+                    this,
+                    EventPriority.MONITOR,
+                    executor,
+                    this,
+                    true
+            );
+
+            getHandlersMethod.invoke(null);
+            cmiBalanceListenerRegistered = true;
+            getLogger().info("已接入 CMIUserBalanceChangeEvent，用于捕获 CMI 原生命令的默认货币变更");
+        } catch (ReflectiveOperationException exception) {
+            cmiBalanceListenerRegistered = false;
+            getLogger().warning("未能注册 CMI 余额变更事件监听，将仅依赖 Vault 代理层和保底扫描");
+            debug("CMI 事件注册失败: " + exception.getMessage());
+        }
+    }
+
+    private void handleCmiBalanceChange(Event event, Class<?> eventClass, Method getUserMethod) {
+        if (maintenanceMode || store == null || !eventClass.isInstance(event)) {
+            return;
+        }
+        try {
+            Object user = getUserMethod.invoke(event);
+            if (user == null) {
+                return;
+            }
+            Method getUniqueIdMethod = user.getClass().getMethod("getUniqueId");
+            UUID uuid = (UUID) getUniqueIdMethod.invoke(user);
+            if (uuid == null) {
+                return;
+            }
+            OfflinePlayer player = Bukkit.getOfflinePlayer(uuid);
+            recordDefaultBalanceChange(player, getBackendBalance(player), "cmi-balance-event");
+        } catch (ReflectiveOperationException exception) {
+            log(Level.WARNING, "处理 CMI 余额变更事件失败", exception);
+        }
+    }
+
+    private void recordDefaultBalanceChange(OfflinePlayer player, BigDecimal balance, String reason) {
+        if (player == null || store == null || config == null) {
+            return;
+        }
+
+        UUID uuid = player.getUniqueId();
+        PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
+        CurrencyState defaultState = state.defaultState;
+        BigDecimal previous = defaultState.lastObservedBalance;
+        defaultState.lastObservedBalance = balance;
+
+        long now = System.currentTimeMillis();
+        if (previous != null
+                && now < defaultState.suppressWritesUntilMillis
+                && sameBalance(previous, balance)) {
+            return;
+        }
+
+        scheduleWrite(uuid, config.defaultCurrencyId(), balance, defaultState, reason);
+
+        if (maintenanceMode) {
+            lastObservedMaintenanceChangeMillis = now;
+            drainCompleted = false;
+            verifyCompleted = false;
+        }
+    }
+
+    private CompletableFuture<BalanceMutationResult> mutateBalanceAsync(
+            UUID playerId,
+            String currencyId,
+            BigDecimal amount,
+            MutationType mutationType,
+            String reason
+    ) {
+        CurrencyDefinition currency = getCurrencies().get(currencyId);
+        if (currency == null) {
+            return CompletableFuture.completedFuture(BalanceMutationResult.failed(playerId, currencyId, "未知货币"));
+        }
+        if (!canAcceptEconomicOperations()) {
+            return CompletableFuture.completedFuture(BalanceMutationResult.failed(playerId, currencyId, "当前阶段不允许修改余额"));
+        }
+        if (amount.signum() < 0) {
+            return CompletableFuture.completedFuture(BalanceMutationResult.failed(playerId, currencyId, "金额不能为负数"));
+        }
+
+        return runAsync(() -> {
+            Optional<BalanceRecord> existingRecord = store.load(playerId, currencyId);
+            long knownRevision = existingRecord.map(BalanceRecord::revision).orElseGet(() -> {
+                PlayerState state = states.get(playerId);
+                CurrencyState currencyState = state == null ? null : state.stateFor(currencyId);
+                return currencyState == null ? 0L : currencyState.knownRevision;
+            });
+            BigDecimal previous = existingRecord.map(BalanceRecord::balance)
+                    .orElseGet(() -> initialAuthoritativeBalance(playerId, currencyId));
+            BigDecimal target = switch (mutationType) {
+                case SET -> amount;
+                case ADD -> previous.add(amount);
+                case TAKE -> previous.subtract(amount);
+            };
+            target = currency.normalize(target);
+            if (target.signum() < 0) {
+                return BalanceMutationResult.failed(playerId, currencyId, "余额不能小于 0");
+            }
+
+            BalanceRecord record = store.writeSnapshot(playerId, currencyId, target, knownRevision, config.serverId());
+            return new BalanceMutationResult(
+                    true,
+                    "ok",
+                    playerId,
+                    currencyId,
+                    previous,
+                    record.balance(),
+                    record.balance().subtract(previous),
+                    record.revision()
+            );
+        }).thenCompose(result -> {
+            if (!result.success()) {
+                return CompletableFuture.completedFuture(result);
+            }
+
+            CompletableFuture<BalanceMutationResult> future = new CompletableFuture<>();
+            Bukkit.getScheduler().runTask(this, () -> {
+                applyMutationResultToLocalState(result, reason);
+                future.complete(result);
+            });
+            return future;
+        });
+    }
+
+    private void applyMutationResultToLocalState(BalanceMutationResult result, String reason) {
+        CurrencyDefinition currency = getCurrencies().get(result.currencyId());
+        if (currency == null) {
+            return;
+        }
+
+        UUID playerId = result.playerId();
+        PlayerState state = states.computeIfAbsent(playerId, ignored -> new PlayerState());
+        CurrencyState currencyState = state.stateFor(result.currencyId());
+        currencyState.knownRevision = Math.max(currencyState.knownRevision, result.revision());
+        currencyState.lastObservedBalance = result.newBalance();
+
+        Player online = Bukkit.getPlayer(playerId);
+        if (config.defaultCurrencyId().equals(result.currencyId()) && online != null && online.isOnline()) {
+            BalanceRecord record = new BalanceRecord(
+                    playerId,
+                    result.currencyId(),
+                    result.newBalance(),
+                    result.revision(),
+                    System.currentTimeMillis(),
+                    config.serverId()
+            );
+            applyAuthoritativeDefaultBalance(online, currencyState, record, reason);
+        } else if (online != null && online.isOnline()) {
+            notifyBalanceChange(online, currency, result.changedAmount(), result.newBalance(), reason);
+        }
+
+        fireBalanceChangeEvent(playerId, result.currencyId(), result.previousBalance(), result.newBalance(), reason, false);
+    }
+
+    private BigDecimal loadAuthoritativeBalance(UUID playerId, String currencyId) throws SQLException {
+        CurrencyDefinition currency = getCurrencies().get(currencyId);
+        if (currency == null) {
+            return BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
+        }
+        return store.load(playerId, currencyId)
+                .map(BalanceRecord::balance)
+                .orElseGet(currency::normalizedStartingBalance);
+    }
+
+    private BigDecimal initialAuthoritativeBalance(UUID playerId, String currencyId) {
+        if (config.defaultCurrencyId().equals(currencyId)) {
+            Player online = Bukkit.getPlayer(playerId);
+            if (online != null && online.isOnline()) {
+                return getBackendBalance(online);
+            }
+            PlayerState state = states.get(playerId);
+            if (state != null && state.defaultState.lastObservedBalance != null) {
+                return state.defaultState.lastObservedBalance;
+            }
+            return BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
+        }
+        CurrencyDefinition currency = getCurrencies().get(currencyId);
+        return currency == null ? BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP) : currency.normalizedStartingBalance();
+    }
+
+    private void notifyBalanceChange(OfflinePlayer player, CurrencyDefinition currency, BigDecimal delta, BigDecimal balance, String reason) {
+        if (!(player instanceof Player onlinePlayer)) {
+            return;
+        }
+        if (!currency.notifyOnChange() || delta.signum() == 0) {
+            return;
+        }
+
+        Map<String, String> placeholders = new LinkedHashMap<>();
+        placeholders.put("amount", formatAmount(currency, delta.abs()));
+        placeholders.put("balance", formatAmount(currency, balance));
+        placeholders.put("currency", currency.displayLabel());
+        placeholders.put("reason", reason);
+
+        if (delta.signum() > 0) {
+            onlinePlayer.sendMessage(lang.ok("player.balance-added", placeholders));
+        } else {
+            onlinePlayer.sendMessage(lang.warn("player.balance-removed", placeholders));
+        }
+    }
+
+    private void notifyRemoteChangeIfNeeded(OfflinePlayer player, CurrencyDefinition currency, BigDecimal previous, BigDecimal current, String reason) {
+        if ("join".equals(reason) || "reload".equals(reason) || "maintenance-off".equals(reason)) {
+            return;
+        }
+        BigDecimal delta = current.subtract(previous);
+        notifyBalanceChange(player, currency, delta, current, reason);
+    }
+
+    private void fireBalanceChangeEvent(UUID playerId, String currencyId, BigDecimal previous, BigDecimal current, String reason, boolean remoteSync) {
+        if (sameBalance(previous, current)) {
+            return;
+        }
+        Bukkit.getPluginManager().callEvent(new VaultSyncCurrencyBalanceChangeEvent(
+                playerId,
+                currencyId,
+                previous,
+                current,
+                reason,
+                remoteSync
+        ));
+    }
+
+    private List<OfflinePlayer> collectKnownPlayers() {
+        Map<UUID, OfflinePlayer> players = new LinkedHashMap<>();
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            players.put(player.getUniqueId(), player);
+        }
+        for (UUID uuid : states.keySet()) {
+            players.putIfAbsent(uuid, Bukkit.getOfflinePlayer(uuid));
+        }
+        return new ArrayList<>(players.values());
+    }
+
+    private List<String> listKnownPlayerNames() {
+        return collectKnownPlayers().stream()
+                .map(this::displayPlayer)
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
+    }
+
+    private OfflinePlayer resolveOfflinePlayer(String input) {
+        Player online = Bukkit.getPlayerExact(input);
+        if (online != null) {
+            return online;
+        }
+        try {
+            return Bukkit.getOfflinePlayer(UUID.fromString(input));
+        } catch (IllegalArgumentException ignored) {
+            return Bukkit.getOfflinePlayer(input);
+        }
+    }
+
+    private BigDecimal getBackendBalance(OfflinePlayer player) {
+        if (backendEconomy == null || player == null) {
+            return BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
+        }
+        return scaled(backendEconomy.getBalance(player));
+    }
+
+    private String displayPlayer(OfflinePlayer player) {
+        return player.getName() != null ? player.getName() : player.getUniqueId().toString();
     }
 
     private <T> CompletableFuture<T> runAsync(CheckedSupplier<T> supplier) {
@@ -789,6 +1468,30 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         return BigDecimal.valueOf(amount).setScale(4, RoundingMode.HALF_UP);
     }
 
+    private BigDecimal normalizeAmount(BigDecimal amount) {
+        return amount.setScale(4, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal parseAmount(String raw) {
+        try {
+            return normalizeAmount(new BigDecimal(raw));
+        } catch (NumberFormatException exception) {
+            return null;
+        }
+    }
+
+    private String formatAmount(CurrencyDefinition currency, BigDecimal amount) {
+        if (config != null && currency.id().equals(config.defaultCurrencyId()) && backendEconomy != null) {
+            return backendEconomy.format(amount.doubleValue());
+        }
+        return amount.stripTrailingZeros().toPlainString();
+    }
+
+    private String currencyDisplayName(String currencyId) {
+        CurrencyDefinition currency = getCurrencies().get(currencyId);
+        return currency == null ? currencyId : currency.displayLabel();
+    }
+
     private boolean sameBalance(BigDecimal left, BigDecimal right) {
         return left.subtract(right).abs().doubleValue() <= config.epsilon();
     }
@@ -802,10 +1505,17 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 || "server".equalsIgnoreCase(serverId.trim());
     }
 
+    private String normalizeCurrencyId(String currencyId) {
+        if (currencyId == null || currencyId.isBlank()) {
+            return DEFAULT_CURRENCY_ID;
+        }
+        return currencyId.toLowerCase(Locale.ROOT);
+    }
+
     private void printFirstRunSetupNotice() {
         printSetupBanner(
-                "检测到 MMMVaultSync 为首次加载，默认配置文件已生成。",
-                "请先编辑 plugins/MMMVaultSync/config.yml 后再执行 /mmmvaultsync reload。",
+                "检测到 MMMVaultSync 为首次加载，默认配置文件已经生成。",
+                "请先编辑 plugins/MMMVaultSync/config.yml，完成后执行 /mmmvaultsync reload。",
                 List.of(
                         "server-id",
                         "database.host",
@@ -836,7 +1546,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         getLogger().warning("==================================================");
         getLogger().warning(title);
         getLogger().warning(action);
-        getLogger().warning("请确认以下项目:");
+        getLogger().warning("请确认以下项目：");
         for (String item : items) {
             getLogger().warning("- " + item);
         }
@@ -867,6 +1577,11 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public boolean isReloadInProgress() {
         return phase == SyncPhase.RELOADING;
+    }
+
+    @Override
+    public boolean canAcceptEconomicOperations() {
+        return !setupRequired && phase == SyncPhase.NORMAL;
     }
 
     private void debug(String message) {
@@ -911,7 +1626,25 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         T get() throws Exception;
     }
 
+    private enum MutationType {
+        SET,
+        ADD,
+        TAKE
+    }
+
     private static final class PlayerState {
+        private final CurrencyState defaultState = new CurrencyState();
+        private final Map<String, CurrencyState> managedStates = new ConcurrentHashMap<>();
+
+        private CurrencyState stateFor(String currencyId) {
+            if (currencyId == null || DEFAULT_CURRENCY_ID.equals(currencyId)) {
+                return defaultState;
+            }
+            return managedStates.computeIfAbsent(currencyId, ignored -> new CurrencyState());
+        }
+    }
+
+    private static final class CurrencyState {
         private BigDecimal lastObservedBalance;
         private BigDecimal pendingWriteBalance;
         private long knownRevision;
@@ -922,7 +1655,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private static final class SyncThreadFactory implements ThreadFactory {
-        private int threadCounter = 0;
+        private int threadCounter;
 
         @Override
         public synchronized Thread newThread(Runnable runnable) {
