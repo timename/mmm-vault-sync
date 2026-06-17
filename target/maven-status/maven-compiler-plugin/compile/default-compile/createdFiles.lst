@@ -4,6 +4,7 @@ local\mmm\vaultsync\MMMVaultSyncPlugin$PlayerState.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$SyncThreadFactory.class
 local\mmm\vaultsync\BalanceStore.class
 local\mmm\vaultsync\SyncConfig.class
+local\mmm\vaultsync\MMMVaultSyncPlugin$1.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$CheckedSupplier.class
 local\mmm\vaultsync\MMMVaultSyncPlugin.class
 local\mmm\vaultsync\api\SyncPhase.class
