@@ -18,7 +18,7 @@ Lightweight cross-server Vault balance sync for a Velocity + Paper/Purpur networ
 
 ## Install
 
-1. Put `target/mmm-vault-sync-1.0.0.jar` into both backend servers' `plugins` folders.
+1. Put `target/mmm-vault-sync-1.2.0.jar` into both backend servers' `plugins` folders.
 2. Start each server once so the plugin generates `plugins/MMMVaultSync/config.yml`.
 3. Set a unique `server-id` on each backend:
    - Survival: `server-id: survival`
@@ -29,5 +29,19 @@ Lightweight cross-server Vault balance sync for a Velocity + Paper/Purpur networ
 ## Notes
 
 - Default sync table: `mmm_vault_sync_balances`
-- Command: `/mmmvaultsync reload|status|sync <player>`
+- Commands:
+  - `/mmmvaultsync maintenance on|off`
+  - `/mmmvaultsync drain`
+  - `/mmmvaultsync verify`
+  - `/mmmvaultsync reload confirm`
+  - `/mmmvaultsync status`
+  - `/mmmvaultsync sync <player>`
 - Permission: `mmmvaultsync.admin`
+
+## Plugin API
+
+- Bukkit service: `local.mmm.vaultsync.api.VaultSyncStateService`
+- State enum: `local.mmm.vaultsync.api.SyncPhase`
+- Event: `local.mmm.vaultsync.api.VaultSyncPhaseChangeEvent`
+
+This API is read-only by design. Other plugins can observe sync state without getting any write access to maintenance, drain, verify, or reload controls.

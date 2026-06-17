@@ -1,5 +1,5 @@
 name: MMMVaultSync
-version: 1.0.0
+version: 1.2.0
 main: local.mmm.vaultsync.MMMVaultSyncPlugin
 api-version: "1.21"
 author: OpenAI
@@ -9,7 +9,7 @@ depend:
 commands:
   mmmvaultsync:
     description: MMM Vault sync administration
-    usage: /mmmvaultsync <reload|status|sync>
+    usage: /mmmvaultsync <reload|status|sync|maintenance|drain|verify>
 permissions:
   mmmvaultsync.admin:
     default: op

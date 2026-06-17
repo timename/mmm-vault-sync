@@ -5,7 +5,7 @@ database:
   port: 3306
   database: minecraft
   username: root
-  password: MC.123MYSQL
+  password: password
   pool-size: 4
   connect-timeout-millis: 5000
   table: mmm_vault_sync_balances
