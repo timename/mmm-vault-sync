@@ -18,7 +18,7 @@ Lightweight cross-server Vault balance sync for a Velocity + Paper/Purpur networ
 
 ## Install
 
-1. Put `target/mmm-vault-sync-1.2.6.jar` into both backend servers' `plugins` folders.
+1. Put `target/mmm-vault-sync-1.3.0.jar` into both backend servers' `plugins` folders.
 2. Start each server once so the plugin generates `plugins/MMMVaultSync/config.yml`.
 3. Set a unique `server-id` on each backend:
    - Survival: `server-id: survival`

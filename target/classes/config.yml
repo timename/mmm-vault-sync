@@ -1,22 +1,51 @@
-server-id: survival
+# MMMVaultSync 配置文件
+#
+# 首次安装流程:
+# 1. 启动服务器，让插件自动生成本配置文件
+# 2. 按下面说明填写真实数据库信息和 server-id
+# 3. 修改完成后执行 /mmmvaultsync reload
+# 4. 无需重启整个服务器
+
+# 当前后端服务器的唯一标识。
+# 不能保留为默认值 server。
+# 示例:
+#   生存服: survival
+#   冒险服: adventure
+server-id: server
 
 database:
+  # MySQL 地址
   host: 127.0.0.1
+  # MySQL 端口
   port: 3306
+  # 数据库名
   database: minecraft
+  # 用户名
   username: root
+  # 密码
+  # 首次安装后必须改成真实密码，不能保留为 password
   password: password
+  # 连接池大小
   pool-size: 4
+  # 数据库连接超时，单位毫秒
   connect-timeout-millis: 5000
+  # 同步数据表名
   table: mmm_vault_sync_balances
 
 sync:
+  # 玩家进服后，延迟多少 tick 再拉取一次权威余额
   join-load-delay-ticks: 10
+  # 本地余额扫描间隔，单位 tick
   local-scan-interval-ticks: 20
+  # 远端刷新间隔，单位秒
   remote-refresh-interval-seconds: 15
+  # 应用远端余额后，短时间内抑制回写，避免旧值抖动，单位毫秒
   write-suppress-millis-after-apply: 3000
+  # 金额比较容差
   epsilon: 0.0001
+  # 玩家退出时是否强制刷新一次余额
   flush-on-quit: true
 
 logging:
+  # 是否开启调试日志
   debug: false

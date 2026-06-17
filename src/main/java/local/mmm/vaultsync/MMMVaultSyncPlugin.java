@@ -19,9 +19,9 @@ import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.io.File;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.io.File;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -45,6 +45,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private static final long RELOAD_CONFIRM_WINDOW_MILLIS = 15_000L;
     private static final long DRAIN_WAIT_TIMEOUT_MILLIS = 15_000L;
     private static final long DRAIN_POLL_INTERVAL_MILLIS = 50L;
+    private static final String PREFIX_INFO = "\u00A76[MMMVaultSync] \u00A7e";
+    private static final String PREFIX_WARN = "\u00A76[MMMVaultSync] \u00A7c";
+    private static final String PREFIX_OK = "\u00A76[MMMVaultSync] \u00A7a";
 
     private final Map<UUID, PlayerState> states = new ConcurrentHashMap<>();
     private final Map<String, Long> pendingReloadConfirmations = new ConcurrentHashMap<>();
@@ -88,17 +91,11 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             return;
         }
 
-        RegisteredServiceProvider<Economy> provider = getServer().getServicesManager().getRegistration(Economy.class);
-        if (provider == null || provider.getProvider() == null) {
-            throw new IllegalStateException("未找到可用的 Vault 经济提供者。");
-        }
-        this.economy = provider.getProvider();
-        this.executor = Executors.newFixedThreadPool(2, new SyncThreadFactory());
-
+        ensureRuntimeReady();
         if (!reloadPluginInternal(true)) {
             throw new IllegalStateException("MMMVaultSync 配置加载失败。");
         }
-        getServer().getServicesManager().register(VaultSyncStateService.class, this, this, ServicePriority.Normal);
+        registerStateServiceIfNeeded();
     }
 
     @Override
@@ -126,12 +123,12 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!sender.hasPermission(ADMIN_PERMISSION)) {
-            sender.sendMessage("你没有权限使用这个命令。");
+            sender.sendMessage(PREFIX_WARN + "你没有权限使用这个命令。");
             return true;
         }
 
         if (args.length == 0) {
-            sender.sendMessage("用法: /mmmvaultsync reload|status|sync|maintenance|drain|verify");
+            sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync reload|status|sync|maintenance|drain|verify");
             return true;
         }
 
@@ -141,59 +138,29 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 return handleSetupReloadCommand(sender);
             }
 
-            sender.sendMessage("MMMVaultSync 当前处于待配置模式，尚未连接数据库。");
-            sender.sendMessage("原因: " + setupReason);
-            sender.sendMessage("请先修改 plugins/MMMVaultSync/config.yml 中的数据库配置和 server-id。");
-            sender.sendMessage("修改完成后可执行 /mmmvaultsync reload，无需重启整个服务器。");
+            sender.sendMessage(PREFIX_WARN + "插件当前处于待配置模式，尚未连接数据库。");
+            sender.sendMessage(PREFIX_INFO + "原因: \u00A7f" + setupReason);
+            sender.sendMessage(PREFIX_INFO + "请先修改 \u00A7fplugins/MMMVaultSync/config.yml");
+            sender.sendMessage(PREFIX_INFO + "修改完成后可执行 \u00A7f/mmmvaultsync reload");
             return true;
         }
 
         String sub = args[0].toLowerCase(Locale.ROOT);
-        switch (sub) {
-            case "reload" -> {
-                return handleReloadCommand(sender, args);
-            }
+        return switch (sub) {
+            case "reload" -> handleReloadCommand(sender, args);
             case "status" -> {
-                sender.sendMessage("MMMVaultSync 当前状态:");
-                sender.sendMessage("服务器标识: " + config.serverId());
-                sender.sendMessage("当前阶段: " + phaseLabel(phase));
-                sender.sendMessage("在线追踪玩家数: " + states.size());
-                sender.sendMessage("本地扫描间隔: " + config.localScanIntervalTicks() + " tick");
-                sender.sendMessage("远端刷新间隔: " + config.remoteRefreshIntervalMillis() + " 毫秒");
-                sender.sendMessage("维护模式: " + yesNo(maintenanceMode));
-                sender.sendMessage("drain 状态: " + yesNo(drainCompleted));
-                sender.sendMessage("verify 状态: " + yesNo(verifyCompleted));
-                sender.sendMessage("异步任务数: " + activeAsyncOperations.get());
-                return true;
+                sendStatus(sender);
+                yield true;
             }
-            case "sync" -> {
-                if (args.length < 2) {
-                    sender.sendMessage("用法: /mmmvaultsync sync <玩家名>");
-                    return true;
-                }
-                Player player = Bukkit.getPlayerExact(args[1]);
-                if (player == null) {
-                    sender.sendMessage("目标玩家不在线。");
-                    return true;
-                }
-                scheduleAuthoritativeLoad(player.getUniqueId(), "manual");
-                sender.sendMessage("已请求同步玩家 " + player.getName() + " 的余额。");
-                return true;
-            }
-            case "maintenance" -> {
-                return handleMaintenanceCommand(sender, args);
-            }
-            case "drain" -> {
-                return handleDrainCommand(sender);
-            }
-            case "verify" -> {
-                return handleVerifyCommand(sender);
-            }
+            case "sync" -> handleSyncCommand(sender, args);
+            case "maintenance" -> handleMaintenanceCommand(sender, args);
+            case "drain" -> handleDrainCommand(sender);
+            case "verify" -> handleVerifyCommand(sender);
             default -> {
-                sender.sendMessage("用法: /mmmvaultsync reload|status|sync|maintenance|drain|verify");
-                return true;
+                sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync reload|status|sync|maintenance|drain|verify");
+                yield true;
             }
-        }
+        };
     }
 
     @Override
@@ -228,12 +195,16 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 if (!event.getPlayer().isOnline()) {
                     return;
                 }
-                event.getPlayer().sendMessage("§6[MMMVaultSync] §e插件当前处于待配置模式。");
-                event.getPlayer().sendMessage("§6[MMMVaultSync] §e原因: " + setupReason);
-                event.getPlayer().sendMessage("§6[MMMVaultSync] §e请先编辑 plugins/MMMVaultSync/config.yml");
-                event.getPlayer().sendMessage("§6[MMMVaultSync] §e至少需要填写: server-id、database.username、database.password");
-                event.getPlayer().sendMessage("§6[MMMVaultSync] §e修改完成后请重启服务器。");
+                event.getPlayer().sendMessage(PREFIX_WARN + "插件当前处于待配置模式。");
+                event.getPlayer().sendMessage(PREFIX_INFO + "原因: \u00A7f" + setupReason);
+                event.getPlayer().sendMessage(PREFIX_INFO + "请先编辑 \u00A7fplugins/MMMVaultSync/config.yml");
+                event.getPlayer().sendMessage(PREFIX_INFO + "至少需要填写: \u00A7fserver-id、database.username、database.password");
+                event.getPlayer().sendMessage(PREFIX_OK + "修改完成后执行: \u00A7f/mmmvaultsync reload");
             }, 40L);
+        }
+
+        if (setupRequired || config == null) {
+            return;
         }
 
         UUID uuid = event.getPlayer().getUniqueId();
@@ -246,73 +217,102 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
-        if (config.flushOnQuit() && !maintenanceMode) {
+        if (config != null && config.flushOnQuit() && !maintenanceMode) {
             flushPlayerNow(uuid, scaled(economy.getBalance(event.getPlayer())), "quit");
         }
         states.remove(uuid);
     }
 
+    private void sendStatus(CommandSender sender) {
+        sender.sendMessage(PREFIX_INFO + "MMMVaultSync 当前状态:");
+        sender.sendMessage("\u00A77- \u00A7e服务器标识: \u00A7f" + config.serverId());
+        sender.sendMessage("\u00A77- \u00A7e当前阶段: \u00A7f" + phaseLabel(phase));
+        sender.sendMessage("\u00A77- \u00A7e在线追踪玩家数: \u00A7f" + states.size());
+        sender.sendMessage("\u00A77- \u00A7e本地扫描间隔: \u00A7f" + config.localScanIntervalTicks() + " tick");
+        sender.sendMessage("\u00A77- \u00A7e远端刷新间隔: \u00A7f" + config.remoteRefreshIntervalMillis() + " 毫秒");
+        sender.sendMessage("\u00A77- \u00A7e维护模式: \u00A7f" + yesNo(maintenanceMode));
+        sender.sendMessage("\u00A77- \u00A7edrain 状态: \u00A7f" + yesNo(drainCompleted));
+        sender.sendMessage("\u00A77- \u00A7everify 状态: \u00A7f" + yesNo(verifyCompleted));
+        sender.sendMessage("\u00A77- \u00A7e异步任务数: \u00A7f" + activeAsyncOperations.get());
+    }
+
+    private boolean handleSyncCommand(CommandSender sender, String[] args) {
+        if (args.length < 2) {
+            sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync sync <玩家名>");
+            return true;
+        }
+        Player player = Bukkit.getPlayerExact(args[1]);
+        if (player == null) {
+            sender.sendMessage(PREFIX_WARN + "目标玩家不在线。");
+            return true;
+        }
+        scheduleAuthoritativeLoad(player.getUniqueId(), "manual");
+        sender.sendMessage(PREFIX_OK + "已请求同步玩家 \u00A7f" + player.getName() + "\u00A7a 的余额。");
+        return true;
+    }
+
     private boolean handleReloadCommand(CommandSender sender, String[] args) {
         if (!maintenanceMode) {
-            sender.sendMessage("当前禁止重载。请先开启维护模式，再依次执行 drain 和 verify。");
+            sender.sendMessage(PREFIX_WARN + "当前禁止重载。请先开启维护模式，再依次执行 drain 和 verify。");
             return true;
         }
         if (!drainCompleted || !verifyCompleted) {
-            sender.sendMessage("当前禁止重载。必须满足: maintenance=on、drain=done、verify=done。");
+            sender.sendMessage(PREFIX_WARN + "当前禁止重载。必须满足: \u00A7fmaintenance=on\u00A7c、\u00A7fdrain=done\u00A7c、\u00A7fverify=done");
             return true;
         }
         if (!isReloadConfirmed(sender, args)) {
-            sender.sendMessage("重载需要二次确认。");
-            sender.sendMessage("风险提示: 即使处于维护模式，其他插件仍可能绕过本同步层直接修改余额。");
-            sender.sendMessage("建议: 只在 drain 和 verify 都成功、且没有玩家交易或改钱时执行重载。");
-            sender.sendMessage("请在 15 秒内执行 '/mmmvaultsync reload confirm' 继续。");
+            sender.sendMessage(PREFIX_WARN + "重载需要二次确认。");
+            sender.sendMessage(PREFIX_INFO + "风险提示: 即使处于维护模式，其他插件仍可能绕过本同步层直接修改余额。");
+            sender.sendMessage(PREFIX_INFO + "建议: 只在 drain 和 verify 都成功、且没有玩家交易或改钱时执行重载。");
+            sender.sendMessage(PREFIX_OK + "请在 15 秒内执行: \u00A7f/mmmvaultsync reload confirm");
             return true;
         }
 
         if (reloadPluginInternal(false)) {
             drainCompleted = false;
             verifyCompleted = false;
-            sender.sendMessage("MMMVaultSync 已重载。");
+            sender.sendMessage(PREFIX_OK + "MMMVaultSync 已重载。");
         } else {
-            sender.sendMessage("MMMVaultSync 重载失败，请检查控制台日志。");
+            sender.sendMessage(PREFIX_WARN + "MMMVaultSync 重载失败，请检查控制台日志。");
         }
         return true;
     }
 
     private boolean handleSetupReloadCommand(CommandSender sender) {
-        sender.sendMessage("正在重新读取 MMMVaultSync 配置...");
+        sender.sendMessage(PREFIX_INFO + "正在重新读取配置...");
 
         reloadConfig();
         if (isConfigUsingPlaceholders()) {
-            sender.sendMessage("配置仍未完成，插件继续保持待配置模式。");
-            sender.sendMessage("请确认以下关键项已经填写真实值:");
-            sender.sendMessage("- server-id");
-            sender.sendMessage("- database.host");
-            sender.sendMessage("- database.port");
-            sender.sendMessage("- database.database");
-            sender.sendMessage("- database.username");
-            sender.sendMessage("- database.password");
+            sender.sendMessage(PREFIX_WARN + "配置仍未完成，插件继续保持待配置模式。");
+            sender.sendMessage(PREFIX_INFO + "请确认以下关键项已经填写真实值:");
+            sender.sendMessage("\u00A77- \u00A7fserver-id");
+            sender.sendMessage("\u00A77- \u00A7fdatabase.host");
+            sender.sendMessage("\u00A77- \u00A7fdatabase.port");
+            sender.sendMessage("\u00A77- \u00A7fdatabase.database");
+            sender.sendMessage("\u00A77- \u00A7fdatabase.username");
+            sender.sendMessage("\u00A77- \u00A7fdatabase.password");
             printConfigPlaceholderNotice();
             return true;
         }
 
+        ensureRuntimeReady();
         setupRequired = false;
         setupReason = "";
         if (!reloadPluginInternal(true)) {
             setupRequired = true;
             setupReason = "配置已修改，但数据库连接或初始化仍然失败";
-            sender.sendMessage("配置重新加载失败，请检查控制台日志和数据库连接配置。");
+            sender.sendMessage(PREFIX_WARN + "配置重新加载失败，请检查控制台日志和数据库连接配置。");
             return true;
         }
 
-        getServer().getServicesManager().register(VaultSyncStateService.class, this, this, ServicePriority.Normal);
-        sender.sendMessage("MMMVaultSync 已完成初始化，现在开始正常工作。");
+        registerStateServiceIfNeeded();
+        sender.sendMessage(PREFIX_OK + "MMMVaultSync 已完成初始化，现在开始正常工作。");
         return true;
     }
 
     private boolean handleMaintenanceCommand(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage("用法: /mmmvaultsync maintenance <on|off>");
+            sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync maintenance <on|off>");
             return true;
         }
 
@@ -324,10 +324,10 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             lastObservedMaintenanceChangeMillis = maintenanceSinceMillis;
             pendingReloadConfirmations.clear();
             setPhase(SyncPhase.MAINTENANCE);
-            sender.sendMessage("维护模式已开启。");
-            sender.sendMessage("当前已冻结同步写入和远端定时刷新。");
-            sender.sendMessage("注意: 本插件无法绝对阻止其他插件直接修改余额。");
-            sender.sendMessage("建议下一步执行: /mmmvaultsync drain -> /mmmvaultsync verify -> /mmmvaultsync reload confirm");
+            sender.sendMessage(PREFIX_OK + "维护模式已开启。");
+            sender.sendMessage(PREFIX_INFO + "当前已冻结同步写入和远端定时刷新。");
+            sender.sendMessage(PREFIX_INFO + "注意: 本插件无法绝对阻止其他插件直接修改余额。");
+            sender.sendMessage(PREFIX_OK + "建议下一步执行: \u00A7f/mmmvaultsync drain \u00A77-> \u00A7f/mmmvaultsync verify \u00A77-> \u00A7f/mmmvaultsync reload confirm");
             return true;
         }
 
@@ -337,74 +337,72 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             verifyCompleted = false;
             pendingReloadConfirmations.clear();
             setPhase(SyncPhase.NORMAL);
-            sender.sendMessage("维护模式已关闭。");
+            sender.sendMessage(PREFIX_OK + "维护模式已关闭。");
             for (Player player : Bukkit.getOnlinePlayers()) {
                 scheduleAuthoritativeLoad(player.getUniqueId(), "maintenance-off");
             }
             return true;
         }
 
-        sender.sendMessage("用法: /mmmvaultsync maintenance <on|off>");
+        sender.sendMessage(PREFIX_INFO + "用法: \u00A7f/mmmvaultsync maintenance <on|off>");
         return true;
     }
 
     private boolean handleDrainCommand(CommandSender sender) {
         if (!maintenanceMode) {
-            sender.sendMessage("当前禁止执行 drain，请先开启维护模式。");
+            sender.sendMessage(PREFIX_WARN + "当前禁止执行 drain，请先开启维护模式。");
             return true;
         }
 
-        sender.sendMessage("开始执行 drain，正在等待在途任务完成并刷新在线玩家余额到数据库...");
+        sender.sendMessage(PREFIX_INFO + "开始执行 drain，正在等待在途任务完成并刷新在线玩家余额到数据库...");
         setPhase(SyncPhase.DRAINING);
         runAsync(this::performDrain).whenComplete((success, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
             if (throwable != null || !Boolean.TRUE.equals(success)) {
                 drainCompleted = false;
                 setPhase(SyncPhase.MAINTENANCE);
-                sender.sendMessage("drain 执行失败，请检查控制台日志。");
+                sender.sendMessage(PREFIX_WARN + "drain 执行失败，请检查控制台日志。");
                 if (throwable != null) {
-                    log(Level.WARNING, "Drain failed", throwable);
+                    log(Level.WARNING, "drain 执行失败", throwable);
                 }
                 return;
             }
             drainCompleted = true;
             verifyCompleted = false;
             setPhase(SyncPhase.MAINTENANCE);
-            sender.sendMessage("drain 执行完成。");
+            sender.sendMessage(PREFIX_OK + "drain 执行完成。");
         }));
         return true;
     }
 
     private boolean handleVerifyCommand(CommandSender sender) {
         if (!maintenanceMode) {
-            sender.sendMessage("当前禁止执行 verify，请先开启维护模式。");
+            sender.sendMessage(PREFIX_WARN + "当前禁止执行 verify，请先开启维护模式。");
             return true;
         }
         if (!drainCompleted) {
-            sender.sendMessage("当前禁止执行 verify，请先完成 drain。");
+            sender.sendMessage(PREFIX_WARN + "当前禁止执行 verify，请先完成 drain。");
             return true;
         }
 
-        sender.sendMessage("开始校验在线玩家余额与 MySQL 是否一致...");
+        sender.sendMessage(PREFIX_INFO + "开始校验在线玩家余额与 MySQL 是否一致...");
         setPhase(SyncPhase.VERIFYING);
         runAsync(this::performVerify).whenComplete((result, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
             if (throwable != null) {
                 verifyCompleted = false;
                 setPhase(SyncPhase.MAINTENANCE);
-                sender.sendMessage("verify 执行失败，请检查控制台日志。");
-                log(Level.WARNING, "Verify failed", throwable);
+                sender.sendMessage(PREFIX_WARN + "verify 执行失败，请检查控制台日志。");
+                log(Level.WARNING, "verify 执行失败", throwable);
                 return;
             }
-
             if (!result.ok()) {
                 verifyCompleted = false;
                 setPhase(SyncPhase.MAINTENANCE);
-                sender.sendMessage("verify 失败: " + result.message());
+                sender.sendMessage(PREFIX_WARN + "verify 失败: \u00A7f" + result.message());
                 return;
             }
-
             verifyCompleted = true;
             setPhase(SyncPhase.MAINTENANCE);
-            sender.sendMessage("verify 成功: " + result.message());
+            sender.sendMessage(PREFIX_OK + "verify 成功: \u00A7f" + result.message());
         }));
         return true;
     }
@@ -454,11 +452,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         resyncTrackedPlayersAfterReload();
         restartScanTask();
-        if (maintenanceMode) {
-            setPhase(SyncPhase.MAINTENANCE);
-        } else {
-            setPhase(SyncPhase.NORMAL);
-        }
+        setPhase(maintenanceMode ? SyncPhase.MAINTENANCE : SyncPhase.NORMAL);
         return true;
     }
 
@@ -502,8 +496,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                     lastObservedMaintenanceChangeMillis = now;
                     drainCompleted = false;
                     verifyCompleted = false;
-                    debug("Detected balance change during maintenance for " + player.getName()
-                            + ": " + state.lastObservedBalance + " -> " + observed);
+                    debug("维护模式期间检测到余额变化: " + player.getName() + " " + state.lastObservedBalance + " -> " + observed);
                 }
                 state.lastObservedBalance = observed;
                 continue;
@@ -580,14 +573,14 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         state.suppressWritesUntilMillis = System.currentTimeMillis() + config.writeSuppressMillisAfterApply();
         state.knownRevision = Math.max(state.knownRevision, record.revision());
         state.lastObservedBalance = record.balance();
-        debug("Applied remote balance for " + player.getName() + ": " + current + " -> " + record.balance() + " (" + reason + ")");
+        debug("已应用远端余额: " + player.getName() + " " + current + " -> " + record.balance() + " (" + reason + ")");
     }
 
     private void scheduleWrite(UUID uuid, BigDecimal balance, PlayerState state, String reason) {
         if (maintenanceMode) {
             drainCompleted = false;
             verifyCompleted = false;
-            debug("Skipped write during maintenance for " + uuid + " (" + reason + ")");
+            debug("维护模式期间跳过写入: " + uuid + " (" + reason + ")");
             return;
         }
 
@@ -605,7 +598,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                         log(Level.WARNING, "写入玩家余额失败: " + uuid + " (" + reason + ")", throwable);
                     } else if (record != null) {
                         state.knownRevision = Math.max(state.knownRevision, record.revision());
-                        debug("Wrote balance for " + uuid + ": " + record.balance() + " rev=" + record.revision() + " (" + reason + ")");
+                        debug("已写入余额: " + uuid + " " + record.balance() + " rev=" + record.revision() + " (" + reason + ")");
                     }
 
                     if (state.pendingWriteBalance != null) {
@@ -630,8 +623,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private void flushOnlinePlayersBlocking(String reason) {
-        BalanceStore targetStore = this.store;
-        if (targetStore == null) {
+        if (store == null || economy == null) {
             return;
         }
 
@@ -641,7 +633,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             PlayerState state = states.get(uuid);
             long knownRevision = state == null ? 0L : state.knownRevision;
             BigDecimal balance = scaled(economy.getBalance(player));
-            futures.add(runAsync(() -> targetStore.writeSnapshot(uuid, balance, knownRevision, config.serverId())));
+            futures.add(runAsync(() -> store.writeSnapshot(uuid, balance, knownRevision, config.serverId())));
         }
 
         for (CompletableFuture<BalanceRecord> future : futures) {
@@ -650,6 +642,10 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private void resyncTrackedPlayersAfterReload() {
+        if (economy == null || config == null) {
+            return;
+        }
+
         states.keySet().retainAll(Bukkit.getOnlinePlayers().stream()
                 .map(Player::getUniqueId)
                 .collect(Collectors.toSet()));
@@ -669,8 +665,10 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
     private void restartScanTask() {
         stopScanTask();
-        scanTask = Bukkit.getScheduler().runTaskTimer(this, this::scanOnlinePlayers,
-                config.localScanIntervalTicks(), config.localScanIntervalTicks());
+        if (config != null) {
+            scanTask = Bukkit.getScheduler().runTaskTimer(this, this::scanOnlinePlayers,
+                    config.localScanIntervalTicks(), config.localScanIntervalTicks());
+        }
     }
 
     private void stopScanTask() {
@@ -743,6 +741,109 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         return new VerifyResult(true, "所有在线玩家余额都与 MySQL 一致");
     }
 
+    private void waitForInFlightTasks() throws InterruptedException {
+        long deadline = System.currentTimeMillis() + DRAIN_WAIT_TIMEOUT_MILLIS;
+        while (activeAsyncOperations.get() > 0) {
+            if (System.currentTimeMillis() >= deadline) {
+                throw new IllegalStateException("等待异步任务完成超时");
+            }
+            Thread.sleep(DRAIN_POLL_INTERVAL_MILLIS);
+        }
+    }
+
+    private void ensureRuntimeReady() {
+        if (economy == null) {
+            RegisteredServiceProvider<Economy> provider = getServer().getServicesManager().getRegistration(Economy.class);
+            if (provider == null || provider.getProvider() == null) {
+                throw new IllegalStateException("未找到可用的 Vault 经济提供者。");
+            }
+            economy = provider.getProvider();
+        }
+        if (executor == null || executor.isShutdown()) {
+            executor = Executors.newFixedThreadPool(2, new SyncThreadFactory());
+        }
+    }
+
+    private void registerStateServiceIfNeeded() {
+        RegisteredServiceProvider<VaultSyncStateService> registration =
+                getServer().getServicesManager().getRegistration(VaultSyncStateService.class);
+        if (registration == null || registration.getProvider() != this) {
+            getServer().getServicesManager().register(VaultSyncStateService.class, this, this, ServicePriority.Normal);
+        }
+    }
+
+    private <T> CompletableFuture<T> runAsync(CheckedSupplier<T> supplier) {
+        activeAsyncOperations.incrementAndGet();
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return supplier.get();
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            } finally {
+                activeAsyncOperations.decrementAndGet();
+            }
+        }, executor);
+    }
+
+    private BigDecimal scaled(double amount) {
+        return BigDecimal.valueOf(amount).setScale(4, RoundingMode.HALF_UP);
+    }
+
+    private boolean sameBalance(BigDecimal left, BigDecimal right) {
+        return left.subtract(right).abs().doubleValue() <= config.epsilon();
+    }
+
+    private boolean isConfigUsingPlaceholders() {
+        String password = getConfig().getString("database.password", "");
+        String serverId = getConfig().getString("server-id", "server");
+        return password == null
+                || password.isBlank()
+                || "password".equalsIgnoreCase(password.trim())
+                || "server".equalsIgnoreCase(serverId.trim());
+    }
+
+    private void printFirstRunSetupNotice() {
+        printSetupBanner(
+                "检测到 MMMVaultSync 为首次加载，默认配置文件已生成。",
+                "请先编辑 plugins/MMMVaultSync/config.yml 后再执行 /mmmvaultsync reload。",
+                List.of(
+                        "server-id",
+                        "database.host",
+                        "database.port",
+                        "database.database",
+                        "database.username",
+                        "database.password"
+                ),
+                "当前插件已进入待配置模式，不会尝试连接数据库。"
+        );
+    }
+
+    private void printConfigPlaceholderNotice() {
+        printSetupBanner(
+                "检测到 MMMVaultSync 配置仍在使用默认占位值。",
+                "请检查 plugins/MMMVaultSync/config.yml，并填写真实配置后执行 /mmmvaultsync reload。",
+                List.of(
+                        "server-id 不能保留为 'server'",
+                        "database.password 不能保留为 'password' 或空值"
+                ),
+                "当前插件已进入待配置模式，不会尝试连接数据库。"
+        );
+    }
+
+    private void printSetupBanner(String title, String action, List<String> items, String footer) {
+        getLogger().warning("==================================================");
+        getLogger().warning("MMMVaultSync 安装向导");
+        getLogger().warning("==================================================");
+        getLogger().warning(title);
+        getLogger().warning(action);
+        getLogger().warning("请确认以下项目:");
+        for (String item : items) {
+            getLogger().warning("- " + item);
+        }
+        getLogger().warning(footer);
+        getLogger().warning("==================================================");
+    }
+
     @Override
     public SyncPhase getPhase() {
         return phase;
@@ -768,92 +869,10 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         return phase == SyncPhase.RELOADING;
     }
 
-    private void waitForInFlightTasks() throws InterruptedException {
-        long deadline = System.currentTimeMillis() + DRAIN_WAIT_TIMEOUT_MILLIS;
-        while (activeAsyncOperations.get() > 0) {
-            if (System.currentTimeMillis() >= deadline) {
-                throw new IllegalStateException("等待异步任务完成超时");
-            }
-            Thread.sleep(DRAIN_POLL_INTERVAL_MILLIS);
-        }
-    }
-
-    private <T> CompletableFuture<T> runAsync(CheckedSupplier<T> supplier) {
-        activeAsyncOperations.incrementAndGet();
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                return supplier.get();
-            } catch (Exception exception) {
-                throw new RuntimeException(exception);
-            } finally {
-                activeAsyncOperations.decrementAndGet();
-            }
-        }, executor);
-    }
-
-    private BigDecimal scaled(double amount) {
-        return BigDecimal.valueOf(amount).setScale(4, RoundingMode.HALF_UP);
-    }
-
-    private boolean sameBalance(BigDecimal left, BigDecimal right) {
-        return left.subtract(right).abs().doubleValue() <= config.epsilon();
-    }
-
     private void debug(String message) {
-        if (config.debugLogging()) {
+        if (config != null && config.debugLogging()) {
             getLogger().info("[debug] " + message);
         }
-    }
-
-    private boolean isConfigUsingPlaceholders() {
-        String password = getConfig().getString("database.password", "");
-        String serverId = getConfig().getString("server-id", "server");
-        return password == null
-                || password.isBlank()
-                || "password".equalsIgnoreCase(password.trim())
-                || "server".equalsIgnoreCase(serverId.trim());
-    }
-
-    private void printFirstRunSetupNotice() {
-        printSetupBanner(
-                "检测到 MMMVaultSync 为首次加载，默认配置文件已生成。",
-                "请先编辑 plugins/MMMVaultSync/config.yml 后再重启服务器。",
-                List.of(
-                        "server-id",
-                        "database.host",
-                        "database.port",
-                        "database.database",
-                        "database.username",
-                        "database.password"
-                ),
-                "当前插件已进入待配置模式，不会尝试连接数据库。"
-        );
-    }
-
-    private void printConfigPlaceholderNotice() {
-        printSetupBanner(
-                "检测到 MMMVaultSync 配置仍在使用默认占位值。",
-                "请检查 plugins/MMMVaultSync/config.yml，并填写真实配置后重启服务器。",
-                List.of(
-                        "server-id 不能保留为 'server'",
-                        "database.password 不能保留为 'password' 或空值"
-                ),
-                "当前插件已进入待配置模式，不会尝试连接数据库。"
-        );
-    }
-
-    private void printSetupBanner(String title, String action, List<String> items, String footer) {
-        getLogger().warning("==================================================");
-        getLogger().warning("MMMVaultSync 安装向导");
-        getLogger().warning("==================================================");
-        getLogger().warning(title);
-        getLogger().warning(action);
-        getLogger().warning("请确认以下项目:");
-        for (String item : items) {
-            getLogger().warning("- " + item);
-        }
-        getLogger().warning(footer);
-        getLogger().warning("==================================================");
     }
 
     private String yesNo(boolean value) {
@@ -871,13 +890,13 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private void setPhase(SyncPhase newPhase) {
-        SyncPhase oldPhase = this.phase;
+        SyncPhase oldPhase = phase;
         if (oldPhase == newPhase) {
             return;
         }
-        this.phase = newPhase;
+        phase = newPhase;
         Bukkit.getPluginManager().callEvent(new VaultSyncPhaseChangeEvent(oldPhase, newPhase));
-        debug("Phase changed: " + oldPhase + " -> " + newPhase);
+        debug("阶段变化: " + oldPhase + " -> " + newPhase);
     }
 
     private void log(Level level, String message, Throwable throwable) {
