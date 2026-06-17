@@ -1,0 +1,7 @@
+local\mmm\vaultsync\SyncConfig.class
+local\mmm\vaultsync\MMMVaultSyncPlugin$CheckedSupplier.class
+local\mmm\vaultsync\MMMVaultSyncPlugin.class
+local\mmm\vaultsync\BalanceRecord.class
+local\mmm\vaultsync\MMMVaultSyncPlugin$PlayerState.class
+local\mmm\vaultsync\MMMVaultSyncPlugin$SyncThreadFactory.class
+local\mmm\vaultsync\BalanceStore.class

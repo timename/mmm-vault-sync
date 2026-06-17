@@ -1,0 +1,22 @@
+server-id: survival
+
+database:
+  host: 127.0.0.1
+  port: 3306
+  database: minecraft
+  username: root
+  password: MC.123MYSQL
+  pool-size: 4
+  connect-timeout-millis: 5000
+  table: mmm_vault_sync_balances
+
+sync:
+  join-load-delay-ticks: 10
+  local-scan-interval-ticks: 20
+  remote-refresh-interval-seconds: 15
+  write-suppress-millis-after-apply: 3000
+  epsilon: 0.0001
+  flush-on-quit: true
+
+logging:
+  debug: false
