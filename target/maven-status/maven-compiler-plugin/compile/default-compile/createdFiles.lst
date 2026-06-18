@@ -15,6 +15,7 @@ local\mmm\vaultsync\MMMVaultSyncPlugin$MutationType.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$NoticeMark.class
 local\mmm\vaultsync\RedisSyncManager$RedisThreadFactory.class
 local\mmm\vaultsync\SyncEconomyProxy.class
+local\mmm\vaultsync\MMMVaultSyncPlugin$RevisionNoticeMark.class
 local\mmm\vaultsync\BalanceRecord.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$PlayerState.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$SyncThreadFactory.class

@@ -2,9 +2,14 @@
 
 ## Version
 
-当前版本：`3.1.2`
+当前版本：`3.1.3`
 
 ## 更新内容
+
+### 3.1.3
+
+- 普通玩家余额变动提示不再显示 `[MMMVaultSync]` 前缀。
+- 新增基于余额 revision 的跨服重复提示抑制，减少玩家切服后收到同一次余额变动提示的情况。
 
 ### 3.1.2
 
@@ -78,7 +83,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.1.2.jar](target/mmm-vault-sync-3.1.2.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.1.3.jar](target/mmm-vault-sync-3.1.3.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -396,7 +401,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.1.2.jar
+target/mmm-vault-sync-3.1.3.jar
 ```
 
 ## 当前建议

@@ -62,6 +62,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private static final List<String> BALANCE_QUERY_ACTIONS = List.of("query", "q");
     private static final List<String> BALANCE_MUTATION_ACTIONS = List.of("set", "add", "take");
     private static final long BALANCE_NOTICE_SUPPRESSION_MILLIS = 30_000L;
+    private static final long REMOTE_NOTICE_SUPPRESSION_MILLIS = 300_000L;
     private static final long RELOAD_CONFIRM_WINDOW_MILLIS = 15_000L;
     private static final long DRAIN_WAIT_TIMEOUT_MILLIS = 15_000L;
     private static final long DRAIN_POLL_INTERVAL_MILLIS = 50L;
@@ -69,6 +70,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private final Map<UUID, PlayerState> states = new ConcurrentHashMap<>();
     private final Map<String, Long> pendingReloadConfirmations = new ConcurrentHashMap<>();
     private final Map<UUID, Map<String, NoticeMark>> recentBalanceNotices = new ConcurrentHashMap<>();
+    private final Map<UUID, Map<String, RevisionNoticeMark>> remoteBalanceNotices = new ConcurrentHashMap<>();
     private final AtomicInteger activeAsyncOperations = new AtomicInteger();
 
     private Lang lang;
@@ -151,6 +153,8 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         syncEconomyProxy = null;
         states.clear();
         pendingReloadConfirmations.clear();
+        recentBalanceNotices.clear();
+        remoteBalanceNotices.clear();
         phase = SyncPhase.NORMAL;
     }
 
@@ -307,6 +311,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
         states.remove(uuid);
         recentBalanceNotices.remove(uuid);
+        remoteBalanceNotices.remove(uuid);
     }
 
     public void afterEconomyMutation(OfflinePlayer player, EconomyResponse response, String reason) {
@@ -316,7 +321,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         BigDecimal delta = scaled(response.amount);
         BigDecimal balance = scaled(response.balance);
         debug("Vault 默认货币变更: 玩家=" + displayPlayer(player) + ", 原因=" + reason + ", 新余额=" + balance);
-        notifyBalanceChangeIfNeeded(player, config.defaultCurrency(), delta, balance, reason);
+        notifyBalanceChangeIfNeeded(player, config.defaultCurrency(), delta, balance, reason, 0L);
         recordDefaultBalanceChange(player, balance, reason);
     }
 
@@ -1010,7 +1015,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         state.suppressWritesUntilMillis = System.currentTimeMillis() + config.writeSuppressMillisAfterApply();
         state.knownRevision = Math.max(state.knownRevision, record.revision());
         state.lastObservedBalance = record.balance();
-        notifyBalanceChangeIfNeeded(player, config.defaultCurrency(), record.balance().subtract(current), record.balance(), reason);
+        notifyBalanceChangeIfNeeded(player, config.defaultCurrency(), record.balance().subtract(current), record.balance(), reason, record.revision());
         fireBalanceChangeEvent(player.getUniqueId(), config.defaultCurrencyId(), previous, record.balance(), reason, true);
     }
 
@@ -1030,7 +1035,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         currencyState.knownRevision = Math.max(currencyState.knownRevision, record.revision());
         currencyState.lastObservedBalance = record.balance();
-        notifyBalanceChangeIfNeeded(player, currency, record.balance().subtract(previous), record.balance(), reason);
+        notifyBalanceChangeIfNeeded(player, currency, record.balance().subtract(previous), record.balance(), reason, record.revision());
         fireBalanceChangeEvent(player.getUniqueId(), currency.id(), previous, record.balance(), reason, true);
     }
 
@@ -1147,6 +1152,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             if (store == null || setupRequired) {
                 return;
             }
+            markRemoteBalanceNotice(message.playerId(), message.currencyId(), message.revision());
             scheduleAuthoritativeLoad(message.playerId(), "redis", message.currencyId());
         });
     }
@@ -1571,7 +1577,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             );
             applyAuthoritativeDefaultBalance(online, currencyState, record, reason);
         } else if (online != null && online.isOnline()) {
-            notifyBalanceChangeIfNeeded(online, currency, result.changedAmount(), result.newBalance(), reason);
+            notifyBalanceChangeIfNeeded(online, currency, result.changedAmount(), result.newBalance(), reason, result.revision());
         }
 
         fireBalanceChangeEvent(playerId, result.currencyId(), result.previousBalance(), result.newBalance(), reason, false);
@@ -1618,13 +1624,13 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         placeholders.put("reason", reason);
 
         if (delta.signum() > 0) {
-            onlinePlayer.sendMessage(lang.ok("player.balance-added", placeholders));
+            onlinePlayer.sendMessage(lang.text("player.balance-added", placeholders));
         } else {
-            onlinePlayer.sendMessage(lang.warn("player.balance-removed", placeholders));
+            onlinePlayer.sendMessage(lang.text("player.balance-removed", placeholders));
         }
     }
 
-    private void notifyBalanceChangeIfNeeded(OfflinePlayer player, CurrencyDefinition currency, BigDecimal delta, BigDecimal balance, String reason) {
+    private void notifyBalanceChangeIfNeeded(OfflinePlayer player, CurrencyDefinition currency, BigDecimal delta, BigDecimal balance, String reason, long revision) {
         if (player == null || currency == null) {
             return;
         }
@@ -1638,10 +1644,53 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         if (onlinePlayer == null) {
             return;
         }
+        if (shouldSuppressRemoteBalanceNotice(player.getUniqueId(), currency.id(), revision)) {
+            return;
+        }
         if (shouldSuppressBalanceNotice(player.getUniqueId(), currency.id(), delta, balance)) {
             return;
         }
         notifyBalanceChange(onlinePlayer, currency, delta, balance, reason);
+    }
+
+    private void markRemoteBalanceNotice(UUID playerId, String currencyId, long revision) {
+        if (playerId == null || currencyId == null || revision <= 0L) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Map<String, RevisionNoticeMark> notices = remoteBalanceNotices.computeIfAbsent(playerId, ignored -> new ConcurrentHashMap<>());
+        RevisionNoticeMark previous = notices.get(currencyId);
+        if (previous == null || revision > previous.revision()) {
+            notices.put(currencyId, new RevisionNoticeMark(revision, now));
+        }
+        cleanupRemoteNoticeMarks(playerId, notices, now);
+    }
+
+    private boolean shouldSuppressRemoteBalanceNotice(UUID playerId, String currencyId, long revision) {
+        if (playerId == null || currencyId == null || revision <= 0L) {
+            return false;
+        }
+        Map<String, RevisionNoticeMark> notices = remoteBalanceNotices.get(playerId);
+        if (notices == null) {
+            return false;
+        }
+        RevisionNoticeMark mark = notices.get(currencyId);
+        if (mark == null) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (now - mark.markedAtMillis() >= REMOTE_NOTICE_SUPPRESSION_MILLIS) {
+            cleanupRemoteNoticeMarks(playerId, notices, now);
+            return false;
+        }
+        return mark.revision() >= revision;
+    }
+
+    private void cleanupRemoteNoticeMarks(UUID playerId, Map<String, RevisionNoticeMark> notices, long now) {
+        notices.entrySet().removeIf(entry -> now - entry.getValue().markedAtMillis() >= REMOTE_NOTICE_SUPPRESSION_MILLIS);
+        if (notices.isEmpty()) {
+            remoteBalanceNotices.remove(playerId, notices);
+        }
     }
 
     private boolean shouldSuppressBalanceNotice(UUID playerId, String currencyId, BigDecimal delta, BigDecimal balance) {
@@ -1934,6 +1983,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private record NoticeMark(BigDecimal delta, BigDecimal balance, long notifiedAtMillis) {
+    }
+
+    private record RevisionNoticeMark(long revision, long markedAtMillis) {
     }
 
     private static final class SyncThreadFactory implements ThreadFactory {

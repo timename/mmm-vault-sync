@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project name="maven-antrun-" default="main">
   <target name="main">
-    <delete file="E:\MCserver\git\MMM\mmm-vault-sync\target/original-mmm-vault-sync-3.1.2.jar" quiet="true" />
+    <delete file="E:\MCserver\git\MMM\mmm-vault-sync\target/original-mmm-vault-sync-3.1.3.jar" quiet="true" />
   </target>
 </project>
