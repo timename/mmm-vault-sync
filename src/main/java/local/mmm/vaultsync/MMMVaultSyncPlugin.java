@@ -89,6 +89,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private RedisSyncManager redisSyncManager;
     private VaultSyncPlaceholderExpansion placeholderExpansion;
     private BukkitTask scanTask;
+    private BukkitTask historyCleanupTask;
     private volatile boolean maintenanceMode;
     private volatile boolean drainCompleted;
     private volatile boolean verifyCompleted;
@@ -137,6 +138,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public void onDisable() {
         stopScanTask();
+        stopHistoryCleanupTask();
         try {
             flushOnlinePlayersBlocking("shutdown");
         } catch (Exception exception) {
@@ -849,12 +851,14 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         if (!startup) {
             setPhase(SyncPhase.RELOADING);
             stopScanTask();
+            stopHistoryCleanupTask();
             try {
                 flushOnlinePlayersBlocking("reload");
             } catch (Exception exception) {
                 getLogger().log(Level.SEVERE, "重载前刷新玩家余额失败", exception);
                 setPhase(previousPhase);
                 restartScanTask();
+                restartHistoryCleanupTask();
                 return false;
             }
         }
@@ -883,6 +887,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             if (!startup) {
                 setPhase(previousPhase);
                 restartScanTask();
+                restartHistoryCleanupTask();
             }
             return false;
         }
@@ -901,6 +906,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         ensureEconomyProxyRegistered();
         resyncTrackedPlayersAfterReload();
         restartScanTask();
+        restartHistoryCleanupTask();
         setPhase(maintenanceMode ? SyncPhase.MAINTENANCE : SyncPhase.NORMAL);
         registerServicesIfNeeded();
         registerCmiBalanceListenerIfPresent();
@@ -963,6 +969,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 Math.max(0L, getConfig().getLong("sync.write-suppress-millis-after-apply", 3000L)),
                 Math.max(0.0D, getConfig().getDouble("sync.epsilon", 0.0001D)),
                 getConfig().getBoolean("sync.flush-on-quit", true),
+                Math.max(0, getConfig().getInt("history.retention-days", 30)),
+                Math.max(0, getConfig().getInt("history.max-records-per-player-currency", 500)),
+                Math.max(1200L, getConfig().getLong("history.cleanup-interval-ticks", 432000L)),
                 getConfig().getBoolean("logging.debug", false),
                 DEFAULT_CURRENCY_ID,
                 defaultCurrency,
@@ -1328,11 +1337,54 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
     }
 
+    private void restartHistoryCleanupTask() {
+        stopHistoryCleanupTask();
+        if (config == null || store == null) {
+            return;
+        }
+        if (config.historyRetentionDays() <= 0 && config.historyMaxRecordsPerPlayerCurrency() <= 0) {
+            return;
+        }
+        historyCleanupTask = Bukkit.getScheduler().runTaskTimer(
+                this,
+                this::runHistoryCleanupAsync,
+                Math.min(1200L, config.historyCleanupIntervalTicks()),
+                config.historyCleanupIntervalTicks()
+        );
+    }
+
     private void stopScanTask() {
         if (scanTask != null) {
             scanTask.cancel();
             scanTask = null;
         }
+    }
+
+    private void stopHistoryCleanupTask() {
+        if (historyCleanupTask != null) {
+            historyCleanupTask.cancel();
+            historyCleanupTask = null;
+        }
+    }
+
+    private void runHistoryCleanupAsync() {
+        if (store == null || config == null) {
+            return;
+        }
+        long olderThanMillis = config.historyRetentionDays() <= 0
+                ? 0L
+                : System.currentTimeMillis() - config.historyRetentionDays() * 86_400_000L;
+        int maxRecords = config.historyMaxRecordsPerPlayerCurrency();
+        runAsync(() -> store.cleanupChangeHistory(olderThanMillis, maxRecords))
+                .whenComplete((deleted, throwable) -> {
+                    if (throwable != null) {
+                        log(Level.WARNING, "清理余额变动历史失败", throwable);
+                        return;
+                    }
+                    if (deleted != null && deleted > 0) {
+                        debug("已清理余额变动历史记录: " + deleted);
+                    }
+                });
     }
 
     private List<String> filterByPrefix(List<String> candidates, String input) {

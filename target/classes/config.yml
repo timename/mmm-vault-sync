@@ -81,6 +81,14 @@ sync:
   # 玩家退出时是否强制刷新一次余额
   flush-on-quit: true
 
+history:
+  # 余额变动历史保留天数；0 表示不按天数清理
+  retention-days: 30
+  # 每个玩家每种货币最多保留多少条历史；0 表示不按数量清理
+  max-records-per-player-currency: 500
+  # 历史清理任务间隔，单位 tick；默认 432000 tick = 6 小时
+  cleanup-interval-ticks: 432000
+
 logging:
   # 如需排查同步问题，可临时打开
   debug: false

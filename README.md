@@ -2,9 +2,16 @@
 
 ## Version
 
-当前版本：`3.2.0`
+当前版本：`3.3.0`
 
 ## 更新内容
+
+### 3.3.0
+
+- 新增余额变动历史自动清理配置。
+- 支持按保留天数清理旧历史记录。
+- 支持按每个玩家每种货币保留最近 N 条记录，避免历史表无限增长。
+- 历史清理任务在异步线程执行，不阻塞服务器主线程。
 
 ### 3.2.0
 
@@ -91,7 +98,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.2.0.jar](target/mmm-vault-sync-3.2.0.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.3.0.jar](target/mmm-vault-sync-3.3.0.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -192,6 +199,23 @@ mmm_vault_sync_balance_changes
 - 用于保证同一次余额变化全服只提示一次
 - 用于玩家上线后查看离线期间的余额变动
 - 关服刷盘、维护 drain、启动补种等快照写入不会写入历史记录
+
+`3.3.0` 起，插件会自动清理历史表，避免长期运行后历史记录无限增长。默认策略：
+
+- 保留最近 30 天历史
+- 每个玩家每种货币最多保留 500 条历史
+- 每 6 小时异步清理一次
+
+对应配置：
+
+```yml
+history:
+  retention-days: 30
+  max-records-per-player-currency: 500
+  cleanup-interval-ticks: 432000
+```
+
+如果要关闭某个清理条件，可以设为 `0`。
 
 ### Redis
 
@@ -443,7 +467,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.2.0.jar
+target/mmm-vault-sync-3.3.0.jar
 ```
 
 ## 当前建议

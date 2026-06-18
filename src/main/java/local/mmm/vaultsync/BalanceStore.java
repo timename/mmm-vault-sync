@@ -57,6 +57,7 @@ public final class BalanceStore implements AutoCloseable {
                 migrateLegacySingleCurrencyTable(connection);
             }
             createChangeTable(connection);
+            ensureChangeTableIndexes(connection);
             connection.commit();
         }
     }
@@ -244,6 +245,37 @@ public final class BalanceStore implements AutoCloseable {
         }
     }
 
+    public int cleanupChangeHistory(long olderThanMillis, int maxRecordsPerPlayerCurrency) throws SQLException {
+        int deleted = 0;
+        try (Connection connection = dataSource.getConnection()) {
+            if (olderThanMillis > 0L) {
+                String deleteOldSql = "DELETE FROM `" + changeTableName + "` WHERE created_at < ?";
+                try (PreparedStatement statement = connection.prepareStatement(deleteOldSql)) {
+                    statement.setLong(1, olderThanMillis);
+                    deleted += statement.executeUpdate();
+                }
+            }
+
+            if (maxRecordsPerPlayerCurrency > 0) {
+                String deleteOverflowSql = "DELETE changes FROM `" + changeTableName + "` changes "
+                        + "WHERE ("
+                        + "SELECT COUNT(*) FROM `" + changeTableName + "` newer "
+                        + "WHERE newer.uuid = changes.uuid "
+                        + "AND newer.currency_id = changes.currency_id "
+                        + "AND (newer.created_at > changes.created_at "
+                        + "OR (newer.created_at = changes.created_at AND newer.id > changes.id))"
+                        + ") >= ?";
+                try (PreparedStatement statement = connection.prepareStatement(deleteOverflowSql)) {
+                    statement.setInt(1, maxRecordsPerPlayerCurrency);
+                    deleted += statement.executeUpdate();
+                }
+            }
+
+            connection.commit();
+        }
+        return deleted;
+    }
+
     private void createTable(Connection connection) throws SQLException {
         String sql = "CREATE TABLE IF NOT EXISTS `" + tableName + "` ("
                 + "`uuid` CHAR(36) NOT NULL,"
@@ -277,10 +309,20 @@ public final class BalanceStore implements AutoCloseable {
                 + "PRIMARY KEY (`id`),"
                 + "UNIQUE KEY `uk_balance_change_revision` (`uuid`, `currency_id`, `revision`),"
                 + "KEY `idx_balance_change_unread` (`uuid`, `read_at`, `created_at`),"
-                + "KEY `idx_balance_change_recent` (`uuid`, `created_at`)"
+                + "KEY `idx_balance_change_recent` (`uuid`, `created_at`),"
+                + "KEY `idx_balance_change_cleanup` (`uuid`, `currency_id`, `created_at`, `id`)"
                 + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
         try (Statement statement = connection.createStatement()) {
             statement.execute(sql);
+        }
+    }
+
+    private void ensureChangeTableIndexes(Connection connection) throws SQLException {
+        if (!hasIndex(connection, changeTableName, "idx_balance_change_cleanup")) {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE `" + changeTableName + "` "
+                        + "ADD INDEX `idx_balance_change_cleanup` (`uuid`, `currency_id`, `created_at`, `id`)");
+            }
         }
     }
 
@@ -330,6 +372,18 @@ public final class BalanceStore implements AutoCloseable {
         try (ResultSet resultSet = metaData.getColumns(connection.getCatalog(), null, tableName, columnName)) {
             return resultSet.next();
         }
+    }
+
+    private boolean hasIndex(Connection connection, String targetTableName, String indexName) throws SQLException {
+        DatabaseMetaData metaData = connection.getMetaData();
+        try (ResultSet resultSet = metaData.getIndexInfo(connection.getCatalog(), null, targetTableName, false, false)) {
+            while (resultSet.next()) {
+                if (indexName.equalsIgnoreCase(resultSet.getString("INDEX_NAME"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private void migrateLegacySingleCurrencyTable(Connection connection) throws SQLException {
