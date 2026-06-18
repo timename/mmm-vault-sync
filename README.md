@@ -2,9 +2,17 @@
 
 ## Version
 
-当前版本：`3.1.3`
+当前版本：`3.2.0`
 
 ## 更新内容
+
+### 3.2.0
+
+- 新增余额变动历史表 `mmm_vault_sync_balance_changes`。
+- 在线余额变动提示改为 MySQL 原子抢占，同一次余额 revision 全服只会提醒一次。
+- 玩家离线期间产生的余额变动会记录下来，上线后发送可点击的未读摘要。
+- 新增 `/mmmvaultsync changes` 查看最近余额变动；玩家只能查看自己，管理员可以查看指定玩家。
+- Redis 继续只负责跨服实时刷新，提示去重和历史记录由 MySQL 负责。
 
 ### 3.1.3
 
@@ -83,7 +91,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.1.3.jar](target/mmm-vault-sync-3.1.3.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.2.0.jar](target/mmm-vault-sync-3.2.0.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -165,11 +173,31 @@ currencies:
 mmm_vault_sync_balances
 ```
 
+余额变动历史表名：
+
+```text
+mmm_vault_sync_balance_changes
+```
+
 `2.0.0` 起，表结构按下面的逻辑工作：
 
 - 主键：`(uuid, currency_id)`
 - 默认货币和自管货币统一存表
 - 旧的单货币表会自动迁移，补上 `currency_id`
+
+`3.2.0` 起，插件会额外创建余额变动历史表：
+
+- 每次真实余额变化写入一条历史记录
+- 唯一键：`(uuid, currency_id, revision)`
+- 用于保证同一次余额变化全服只提示一次
+- 用于玩家上线后查看离线期间的余额变动
+- 关服刷盘、维护 drain、启动补种等快照写入不会写入历史记录
+
+### Redis
+
+Redis 是可选的跨服实时刷新通道。开启后，某个子服写入新余额 revision 时，会广播事件给其他子服，让其他子服更快回拉 MySQL。
+
+提示去重不依赖 Redis，而是依赖 MySQL 历史表。因此 Redis 未开启时，余额仍能通过周期刷新同步，并且同一条历史记录仍不会重复提示；只是跨服刷新速度取决于 `sync.remote-refresh-interval-seconds`。
 
 ## 命令
 
@@ -203,6 +231,20 @@ mmmvaultsync.admin
 - `default` 表示主货币
 - 其他货币 ID 表示插件自管货币
 - 余额查询和余额修改都需要 `mmmvaultsync.admin`
+
+### 余额变动记录
+
+```text
+/mmmvaultsync changes [数量]
+/mmmvaultsync changes <玩家> [数量]
+```
+
+说明：
+
+- 普通玩家可以查看自己的最近余额变动
+- 管理员可以查看指定玩家的最近余额变动
+- 玩家上线时，如果离线期间有未读余额变动，会收到一条可点击摘要
+- 玩家点击摘要或执行 `/mmmvaultsync changes` 后，会把显示到的未读记录标记为已读
 
 ### 消息变量
 
@@ -401,7 +443,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.1.3.jar
+target/mmm-vault-sync-3.2.0.jar
 ```
 
 ## 当前建议

@@ -16,12 +16,15 @@ command:
   usage.balance-query: "用法: &f/mmmvaultsync balance <玩家> [货币ID]"
   usage.balance-admin: "用法: &f/mmmvaultsync balance <玩家> <set|add|take> <金额> [货币ID]"
   usage.balance-short: "用法: &f/mmmvaultsync bal <玩家> [货币ID]"
+  usage.changes: "用法: &f/mmmvaultsync changes [数量]"
+  usage.changes-admin: "用法: &f/mmmvaultsync changes <玩家> [数量]"
   help.reload: "&7- &freload &7重载配置与语言文件，维护流程中需要配合 &fconfirm &7确认"
   help.status: "&7- &fstatus &7查看当前阶段、同步状态与维护信息"
   help.sync: "&7- &fsync <玩家> [货币ID] &7同步指定玩家的权威余额到本地"
   help.balance-query: "&7- &fbalance <玩家> [货币ID] &7查询玩家余额"
   help.balance-admin: "&7- &fbalance <玩家> <set|add|take> <金额> [货币ID] &7管理员修改玩家余额"
   help.bal: "&7- &fbal <玩家> [货币ID] &7余额查询短命令"
+  help.changes: "&7- &fchanges [玩家] [数量] &7查看最近余额变动；玩家只能查看自己，管理员可查任意玩家"
   help.maintenance: "&7- &fmaintenance on|off &7切换维护模式；&fdrain &7排空写入；&fverify &7校验；&freload confirm &7重载"
   help.currencies: "&7- &fcurrencies &7查看已加载的货币列表"
   player-offline: "目标玩家当前不在线。"
@@ -104,6 +107,14 @@ balance:
 player:
   balance-added: "你的 &f{currency}&e 增加了 &a{amount}&e，当前余额: &f{balance}"
   balance-removed: "你的 &f{currency}&e 扣除了 &c{amount}&e，当前余额: &f{balance}"
+
+changes:
+  unread-summary: "&e你有 &f{count}&e 条未读余额变动：&f{summary}&e。&a点击查看"
+  click-view: "点击查看最近余额变动"
+  title: "玩家 &f{player}&e 最近 &f{count}&e 条余额变动："
+  entry: "&7[{time}] &f{currency} &e{delta} &7余额: &f{balance} &8| &7来源: &f{reason}"
+  empty: "玩家 &f{player}&e 暂无余额变动记录。"
+  query-failed: "查询玩家 &f{player}&c 的余额变动记录失败。"
 
 
 

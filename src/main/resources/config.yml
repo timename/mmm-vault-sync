@@ -33,6 +33,19 @@ database:
   connect-timeout-millis: 5000
   # 同步数据表名
   table: mmm_vault_sync_balances
+  # 余额变动历史表名
+  # 用于全服只提示一次、离线变动汇总和最近变动查询
+  change-table: mmm_vault_sync_balance_changes
+
+redis:
+  # Redis 用于跨服实时刷新；历史记录和提示去重由 MySQL 负责
+  enabled: false
+  host: 127.0.0.1
+  port: 6379
+  password: ""
+  database: 0
+  channel: mmm:vaultsync:balance
+  reconnect-delay-millis: 3000
 
 # 默认货币 = Vault / CMI 主货币
 default-currency:

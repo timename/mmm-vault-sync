@@ -27,12 +27,19 @@ import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
+import net.md_5.bungee.api.chat.ClickEvent;
+import net.md_5.bungee.api.chat.ComponentBuilder;
+import net.md_5.bungee.api.chat.HoverEvent;
+import net.md_5.bungee.api.chat.TextComponent;
 
 import java.io.File;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.SQLException;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -57,20 +64,20 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
     private static final String ADMIN_PERMISSION = "mmmvaultsync.admin";
     private static final List<String> SUBCOMMANDS = List.of(
-            "help", "reload", "status", "sync", "maintenance", "drain", "verify", "balance", "bal", "currencies"
+            "help", "reload", "status", "sync", "maintenance", "drain", "verify", "balance", "bal", "changes", "currencies"
     );
     private static final List<String> BALANCE_QUERY_ACTIONS = List.of("query", "q");
     private static final List<String> BALANCE_MUTATION_ACTIONS = List.of("set", "add", "take");
     private static final long BALANCE_NOTICE_SUPPRESSION_MILLIS = 30_000L;
-    private static final long REMOTE_NOTICE_SUPPRESSION_MILLIS = 300_000L;
     private static final long RELOAD_CONFIRM_WINDOW_MILLIS = 15_000L;
     private static final long DRAIN_WAIT_TIMEOUT_MILLIS = 15_000L;
     private static final long DRAIN_POLL_INTERVAL_MILLIS = 50L;
+    private static final DateTimeFormatter CHANGE_TIME_FORMATTER = DateTimeFormatter.ofPattern("MM-dd HH:mm")
+            .withZone(ZoneId.systemDefault());
 
     private final Map<UUID, PlayerState> states = new ConcurrentHashMap<>();
     private final Map<String, Long> pendingReloadConfirmations = new ConcurrentHashMap<>();
     private final Map<UUID, Map<String, NoticeMark>> recentBalanceNotices = new ConcurrentHashMap<>();
-    private final Map<UUID, Map<String, RevisionNoticeMark>> remoteBalanceNotices = new ConcurrentHashMap<>();
     private final AtomicInteger activeAsyncOperations = new AtomicInteger();
 
     private Lang lang;
@@ -154,12 +161,14 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         states.clear();
         pendingReloadConfirmations.clear();
         recentBalanceNotices.clear();
-        remoteBalanceNotices.clear();
         phase = SyncPhase.NORMAL;
     }
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (args.length > 0 && "changes".equalsIgnoreCase(args[0]) && !sender.hasPermission(ADMIN_PERMISSION)) {
+            return handleChangesCommand(sender, args);
+        }
         if (!sender.hasPermission(ADMIN_PERMISSION)) {
             sender.sendMessage(lang.warn("command.no-permission", Map.of()));
             return true;
@@ -197,6 +206,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             case "verify" -> handleVerifyCommand(sender);
             case "balance" -> handleBalanceCommand(sender, args);
             case "bal" -> handleBalCommand(sender, args);
+            case "changes" -> handleChangesCommand(sender, args);
             case "currencies" -> {
                 sendCurrencies(sender);
                 yield true;
@@ -221,6 +231,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         sender.sendMessage(lang.info("command.help.balance-query", Map.of()));
         sender.sendMessage(lang.info("command.help.balance-admin", Map.of()));
         sender.sendMessage(lang.info("command.help.bal", Map.of()));
+        sender.sendMessage(lang.info("command.help.changes", Map.of()));
         sender.sendMessage(lang.text("command.group.maintenance", Map.of()));
         sender.sendMessage(lang.info("command.help.maintenance", Map.of()));
     }
@@ -242,6 +253,12 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
         if (args.length == 2 && List.of("sync", "balance", "bal").contains(args[0].toLowerCase(Locale.ROOT))) {
             return filterByPrefix(listKnownPlayerNames(), args[1]);
+        }
+        if (args.length == 2 && "changes".equalsIgnoreCase(args[0])) {
+            return filterByPrefix(listKnownPlayerNames(), args[1]);
+        }
+        if (args.length == 3 && "changes".equalsIgnoreCase(args[0])) {
+            return filterByPrefix(List.of("5", "10", "20"), args[2]);
         }
         if (args.length == 3 && "bal".equalsIgnoreCase(args[0])) {
             List<String> candidates = new ArrayList<>(getCurrencies().keySet());
@@ -300,6 +317,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             Bukkit.getScheduler().runTaskLater(this,
                     () -> scheduleAuthoritativeLoad(uuid, "join", null),
                     config.joinLoadDelayTicks());
+            Bukkit.getScheduler().runTaskLater(this,
+                    () -> sendUnreadChangeSummary(event.getPlayer()),
+                    config.joinLoadDelayTicks() + 20L);
         }
     }
 
@@ -311,7 +331,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
         states.remove(uuid);
         recentBalanceNotices.remove(uuid);
-        remoteBalanceNotices.remove(uuid);
     }
 
     public void afterEconomyMutation(OfflinePlayer player, EconomyResponse response, String reason) {
@@ -321,7 +340,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         BigDecimal delta = scaled(response.amount);
         BigDecimal balance = scaled(response.balance);
         debug("Vault 默认货币变更: 玩家=" + displayPlayer(player) + ", 原因=" + reason + ", 新余额=" + balance);
-        notifyBalanceChangeIfNeeded(player, config.defaultCurrency(), delta, balance, reason, 0L);
         recordDefaultBalanceChange(player, balance, reason);
     }
 
@@ -552,6 +570,72 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             return true;
         }
         return sendBalanceQuery(sender, target, currencyId);
+    }
+
+    private boolean handleChangesCommand(CommandSender sender, String[] args) {
+        if (store == null) {
+            sender.sendMessage(lang.warn("setup.mode.active", Map.of()));
+            return true;
+        }
+
+        boolean admin = sender.hasPermission(ADMIN_PERMISSION);
+        OfflinePlayer target;
+        int limitArgumentIndex;
+        boolean markRead;
+        if (admin && args.length >= 2 && !isInteger(args[1])) {
+            target = resolveOfflinePlayer(args[1]);
+            if (target == null) {
+                sender.sendMessage(lang.warn("command.player-not-found", Map.of("player", args[1])));
+                return true;
+            }
+            limitArgumentIndex = 2;
+            markRead = false;
+        } else {
+            if (!(sender instanceof Player player)) {
+                sender.sendMessage(lang.info("command.usage.changes-admin", Map.of()));
+                return true;
+            }
+            target = player;
+            limitArgumentIndex = 1;
+            markRead = true;
+        }
+
+        int limit = 10;
+        if (args.length > limitArgumentIndex) {
+            Integer parsedLimit = parsePositiveInt(args[limitArgumentIndex]);
+            if (parsedLimit == null) {
+                sender.sendMessage(lang.info(admin ? "command.usage.changes-admin" : "command.usage.changes", Map.of()));
+                return true;
+            }
+            limit = Math.min(50, parsedLimit);
+        }
+
+        OfflinePlayer finalTarget = target;
+        int finalLimit = limit;
+        boolean finalMarkRead = markRead;
+        runAsync(() -> store.loadRecentChanges(finalTarget.getUniqueId(), finalLimit))
+                .whenComplete((changes, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+                    if (throwable != null) {
+                        sender.sendMessage(lang.warn("changes.query-failed", Map.of("player", displayPlayer(finalTarget))));
+                        log(Level.WARNING, "查询余额变动记录失败: " + finalTarget.getUniqueId(), throwable);
+                        return;
+                    }
+                    sendChangeList(sender, finalTarget, changes);
+                    if (finalMarkRead && changes != null && !changes.isEmpty()) {
+                        List<Long> ids = changes.stream()
+                                .filter(change -> change.readAtMillis() == null)
+                                .map(BalanceChangeRecord::id)
+                                .toList();
+                        if (!ids.isEmpty()) {
+                            runAsync(() -> store.markChangesRead(finalTarget.getUniqueId(), ids, System.currentTimeMillis()))
+                                    .exceptionally(markThrowable -> {
+                                        log(Level.WARNING, "标记余额变动已读失败: " + finalTarget.getUniqueId(), markThrowable);
+                                        return null;
+                                    });
+                        }
+                    }
+                }));
+        return true;
     }
 
     private String parseBalanceQueryCurrency(String[] args, int firstArgumentIndex) {
@@ -872,6 +956,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 Math.max(2, getConfig().getInt("database.pool-size", 4)),
                 Math.max(1000L, getConfig().getLong("database.connect-timeout-millis", 5000L)),
                 getConfig().getString("database.table", "mmm_vault_sync_balances"),
+                getConfig().getString("database.change-table", "mmm_vault_sync_balance_changes"),
                 Math.max(1L, getConfig().getLong("sync.join-load-delay-ticks", 10L)),
                 Math.max(1L, getConfig().getLong("sync.local-scan-interval-ticks", 20L)),
                 Math.max(1000L, getConfig().getLong("sync.remote-refresh-interval-seconds", 15L) * 1000L),
@@ -913,8 +998,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             if (!defaultState.writeInFlight
                     && now >= defaultState.suppressWritesUntilMillis
                     && !sameBalance(observed, defaultState.lastObservedBalance)) {
+                BigDecimal previous = defaultState.lastObservedBalance;
                 defaultState.lastObservedBalance = observed;
-                scheduleWrite(uuid, config.defaultCurrencyId(), observed, defaultState, "scan-local-change");
+                scheduleWrite(uuid, config.defaultCurrencyId(), observed, defaultState, "scan-local-change", previous);
             } else {
                 defaultState.lastObservedBalance = observed;
             }
@@ -1040,6 +1126,10 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private void scheduleWrite(UUID uuid, String currencyId, BigDecimal balance, CurrencyState state, String reason) {
+        scheduleWrite(uuid, currencyId, balance, state, reason, state.lastObservedBalance);
+    }
+
+    private void scheduleWrite(UUID uuid, String currencyId, BigDecimal balance, CurrencyState state, String reason, BigDecimal previousBalance) {
         if (maintenanceMode) {
             drainCompleted = false;
             verifyCompleted = false;
@@ -1054,21 +1144,24 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         state.writeInFlight = true;
         long knownRevisionSnapshot = state.knownRevision;
-        runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, knownRevisionSnapshot, config.serverId()))
-                .whenComplete((record, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+        BigDecimal previousBalanceSnapshot = previousBalance;
+        runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, knownRevisionSnapshot, config.serverId(), reason, true, previousBalanceSnapshot))
+                .whenComplete((result, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
                     state.writeInFlight = false;
                     if (throwable != null) {
                         log(Level.WARNING, "写入玩家余额失败: " + uuid + ", currency=" + currencyId + ", reason=" + reason, throwable);
-                    } else if (record != null) {
+                    } else if (result != null) {
+                        BalanceRecord record = result.record();
                         state.knownRevision = Math.max(state.knownRevision, record.revision());
                         state.lastObservedBalance = record.balance();
                         publishRedisBalanceChange(record.uuid(), record.currencyId(), record.revision());
+                        result.change().ifPresent(change -> notifyOnlineBalanceChange(change, reason));
                     }
 
                     if (state.pendingWriteBalance != null) {
                         BigDecimal pending = state.pendingWriteBalance;
                         state.pendingWriteBalance = null;
-                        scheduleWrite(uuid, currencyId, pending, state, "pending");
+                        scheduleWrite(uuid, currencyId, pending, state, "pending", state.lastObservedBalance);
                     }
                 }));
     }
@@ -1088,7 +1181,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         long defaultRevision = state.defaultState.knownRevision;
         BigDecimal defaultSnapshot = defaultBalance;
-        runAsync(() -> store.writeSnapshot(uuid, config.defaultCurrencyId(), defaultSnapshot, defaultRevision, config.serverId()))
+        runAsync(() -> store.writeSnapshot(uuid, config.defaultCurrencyId(), defaultSnapshot, defaultRevision, config.serverId(), reason, false, null))
                 .exceptionally(throwable -> {
                     log(Level.WARNING, "刷新默认货币失败: " + uuid + ", reason=" + reason, throwable);
                     return null;
@@ -1102,7 +1195,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             long revision = currencyState.knownRevision;
             BigDecimal balance = currencyState.lastObservedBalance;
             String currencyId = entry.getKey();
-            runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, revision, config.serverId()))
+            runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, revision, config.serverId(), reason, false, null))
                     .exceptionally(throwable -> {
                         log(Level.WARNING, "刷新自管货币失败: " + uuid + ", currency=" + currencyId + ", reason=" + reason, throwable);
                         return null;
@@ -1152,7 +1245,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             if (store == null || setupRequired) {
                 return;
             }
-            markRemoteBalanceNotice(message.playerId(), message.currencyId(), message.revision());
             scheduleAuthoritativeLoad(message.playerId(), "redis", message.currencyId());
         });
     }
@@ -1172,7 +1264,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             if (defaultBalance != null) {
                 long knownRevision = state.defaultState.knownRevision;
                 BigDecimal snapshotBalance = defaultBalance;
-                futures.add(runAsync(() -> store.writeSnapshot(uuid, config.defaultCurrencyId(), snapshotBalance, knownRevision, config.serverId())));
+                futures.add(runAsync(() -> store.writeSnapshot(uuid, config.defaultCurrencyId(), snapshotBalance, knownRevision, config.serverId(), reason, false, null).record()));
             }
 
             for (Map.Entry<String, CurrencyState> entry : state.managedStates.entrySet()) {
@@ -1182,7 +1274,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 String currencyId = entry.getKey();
                 BigDecimal balance = entry.getValue().lastObservedBalance;
                 long revision = entry.getValue().knownRevision;
-                futures.add(runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, revision, config.serverId())));
+                futures.add(runAsync(() -> store.writeSnapshot(uuid, currencyId, balance, revision, config.serverId(), reason, false, null).record()));
             }
         }
 
@@ -1481,7 +1573,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             return;
         }
 
-        scheduleWrite(uuid, config.defaultCurrencyId(), balance, defaultState, reason);
+        scheduleWrite(uuid, config.defaultCurrencyId(), balance, defaultState, reason, previous);
 
         if (maintenanceMode) {
             lastObservedMaintenanceChangeMillis = now;
@@ -1527,7 +1619,8 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 return BalanceMutationResult.failed(playerId, currencyId, "余额不能小于 0");
             }
 
-            BalanceRecord record = store.writeSnapshot(playerId, currencyId, target, knownRevision, config.serverId());
+            BalanceWriteResult writeResult = store.writeSnapshot(playerId, currencyId, target, knownRevision, config.serverId(), reason, true, previous);
+            BalanceRecord record = writeResult.record();
             publishRedisBalanceChange(record.uuid(), record.currencyId(), record.revision());
             return new BalanceMutationResult(
                     true,
@@ -1630,6 +1723,83 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
     }
 
+    private void notifyOnlineBalanceChange(BalanceChangeRecord change, String reason) {
+        CurrencyDefinition currency = getCurrencies().get(change.currencyId());
+        if (currency == null || !currency.notifyOnChange()) {
+            return;
+        }
+        Player onlinePlayer = Bukkit.getPlayer(change.uuid());
+        if (onlinePlayer == null || !onlinePlayer.isOnline()) {
+            return;
+        }
+        if (shouldSuppressBalanceNotice(change.uuid(), change.currencyId(), change.delta(), change.newBalance())) {
+            return;
+        }
+        runAsync(() -> store.claimNotice(change.uuid(), change.currencyId(), change.revision(), config.serverId(), System.currentTimeMillis()))
+                .whenComplete((claimed, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+                    if (throwable != null) {
+                        log(Level.WARNING, "抢占余额变动提示失败: " + change.uuid() + ", currency=" + change.currencyId()
+                                + ", revision=" + change.revision(), throwable);
+                        return;
+                    }
+                    if (Boolean.TRUE.equals(claimed)) {
+                        notifyBalanceChange(onlinePlayer, currency, change.delta(), change.newBalance(), reason);
+                    }
+                }));
+    }
+
+    private void sendUnreadChangeSummary(Player player) {
+        if (player == null || !player.isOnline() || store == null) {
+            return;
+        }
+        UUID uuid = player.getUniqueId();
+        runAsync(() -> store.loadUnreadChanges(uuid, 20))
+                .whenComplete((changes, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+                    if (throwable != null) {
+                        log(Level.WARNING, "查询未读余额变动失败: " + uuid, throwable);
+                        return;
+                    }
+                    if (changes == null || changes.isEmpty() || !player.isOnline()) {
+                        return;
+                    }
+                    Map<String, BigDecimal> totals = new LinkedHashMap<>();
+                    for (BalanceChangeRecord change : changes) {
+                        totals.merge(change.currencyId(), change.delta(), BigDecimal::add);
+                    }
+                    String summary = totals.entrySet().stream()
+                            .map(entry -> currencyDisplayName(entry.getKey()) + " " + formatSignedAmount(entry.getKey(), entry.getValue()))
+                            .collect(Collectors.joining("，"));
+                    TextComponent component = new TextComponent(lang.text("changes.unread-summary", Map.of(
+                            "count", String.valueOf(changes.size()),
+                            "summary", summary
+                    )));
+                    component.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/mmmvaultsync changes"));
+                    component.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                            new ComponentBuilder(lang.text("changes.click-view", Map.of())).create()));
+                    player.spigot().sendMessage(component);
+                }));
+    }
+
+    private void sendChangeList(CommandSender sender, OfflinePlayer target, List<BalanceChangeRecord> changes) {
+        if (changes == null || changes.isEmpty()) {
+            sender.sendMessage(lang.info("changes.empty", Map.of("player", displayPlayer(target))));
+            return;
+        }
+        sender.sendMessage(lang.info("changes.title", Map.of(
+                "player", displayPlayer(target),
+                "count", String.valueOf(changes.size())
+        )));
+        for (BalanceChangeRecord change : changes) {
+            sender.sendMessage(lang.text("changes.entry", Map.of(
+                    "time", formatTimestamp(change.createdAtMillis()),
+                    "currency", currencyDisplayName(change.currencyId()),
+                    "delta", formatSignedAmount(change.currencyId(), change.delta()),
+                    "balance", formatAmountForCurrency(change.currencyId(), change.newBalance()),
+                    "reason", displayReason(change.reason())
+            )));
+        }
+    }
+
     private void notifyBalanceChangeIfNeeded(OfflinePlayer player, CurrencyDefinition currency, BigDecimal delta, BigDecimal balance, String reason, long revision) {
         if (player == null || currency == null) {
             return;
@@ -1644,53 +1814,24 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         if (onlinePlayer == null) {
             return;
         }
-        if (shouldSuppressRemoteBalanceNotice(player.getUniqueId(), currency.id(), revision)) {
-            return;
-        }
         if (shouldSuppressBalanceNotice(player.getUniqueId(), currency.id(), delta, balance)) {
             return;
         }
-        notifyBalanceChange(onlinePlayer, currency, delta, balance, reason);
-    }
-
-    private void markRemoteBalanceNotice(UUID playerId, String currencyId, long revision) {
-        if (playerId == null || currencyId == null || revision <= 0L) {
+        if (revision <= 0L || store == null || config == null) {
+            notifyBalanceChange(onlinePlayer, currency, delta, balance, reason);
             return;
         }
-        long now = System.currentTimeMillis();
-        Map<String, RevisionNoticeMark> notices = remoteBalanceNotices.computeIfAbsent(playerId, ignored -> new ConcurrentHashMap<>());
-        RevisionNoticeMark previous = notices.get(currencyId);
-        if (previous == null || revision > previous.revision()) {
-            notices.put(currencyId, new RevisionNoticeMark(revision, now));
-        }
-        cleanupRemoteNoticeMarks(playerId, notices, now);
-    }
-
-    private boolean shouldSuppressRemoteBalanceNotice(UUID playerId, String currencyId, long revision) {
-        if (playerId == null || currencyId == null || revision <= 0L) {
-            return false;
-        }
-        Map<String, RevisionNoticeMark> notices = remoteBalanceNotices.get(playerId);
-        if (notices == null) {
-            return false;
-        }
-        RevisionNoticeMark mark = notices.get(currencyId);
-        if (mark == null) {
-            return false;
-        }
-        long now = System.currentTimeMillis();
-        if (now - mark.markedAtMillis() >= REMOTE_NOTICE_SUPPRESSION_MILLIS) {
-            cleanupRemoteNoticeMarks(playerId, notices, now);
-            return false;
-        }
-        return mark.revision() >= revision;
-    }
-
-    private void cleanupRemoteNoticeMarks(UUID playerId, Map<String, RevisionNoticeMark> notices, long now) {
-        notices.entrySet().removeIf(entry -> now - entry.getValue().markedAtMillis() >= REMOTE_NOTICE_SUPPRESSION_MILLIS);
-        if (notices.isEmpty()) {
-            remoteBalanceNotices.remove(playerId, notices);
-        }
+        runAsync(() -> store.claimNotice(player.getUniqueId(), currency.id(), revision, config.serverId(), System.currentTimeMillis()))
+                .whenComplete((claimed, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+                    if (throwable != null) {
+                        log(Level.WARNING, "抢占余额变动提示失败: " + player.getUniqueId() + ", currency=" + currency.id()
+                                + ", revision=" + revision, throwable);
+                        return;
+                    }
+                    if (Boolean.TRUE.equals(claimed)) {
+                        notifyBalanceChange(onlinePlayer, currency, delta, balance, reason);
+                    }
+                }));
     }
 
     private boolean shouldSuppressBalanceNotice(UUID playerId, String currencyId, BigDecimal delta, BigDecimal balance) {
@@ -1808,11 +1949,56 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
     }
 
+    private Integer parsePositiveInt(String raw) {
+        try {
+            int value = Integer.parseInt(raw);
+            return value > 0 ? value : null;
+        } catch (NumberFormatException exception) {
+            return null;
+        }
+    }
+
+    private boolean isInteger(String raw) {
+        return parsePositiveInt(raw) != null;
+    }
+
     private String formatAmount(CurrencyDefinition currency, BigDecimal amount) {
         if (config != null && currency.id().equals(config.defaultCurrencyId()) && backendEconomy != null) {
             return backendEconomy.format(amount.doubleValue());
         }
         return amount.stripTrailingZeros().toPlainString();
+    }
+
+    private String formatAmountForCurrency(String currencyId, BigDecimal amount) {
+        CurrencyDefinition currency = getCurrencies().get(currencyId);
+        return currency == null ? amount.stripTrailingZeros().toPlainString() : formatAmount(currency, amount);
+    }
+
+    private String formatSignedAmount(String currencyId, BigDecimal amount) {
+        String prefix = amount.signum() >= 0 ? "+" : "-";
+        return prefix + formatAmountForCurrency(currencyId, amount.abs());
+    }
+
+    private String formatTimestamp(long millis) {
+        return CHANGE_TIME_FORMATTER.format(Instant.ofEpochMilli(millis));
+    }
+
+    private String displayReason(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return "未知";
+        }
+        int separator = reason.indexOf(':');
+        String normalized = separator >= 0 ? reason.substring(0, separator) : reason;
+        return switch (normalized) {
+            case "admin-set" -> "管理员设置";
+            case "admin-add" -> "管理员增加";
+            case "admin-take" -> "管理员扣除";
+            case "vault-deposit-name", "vault-deposit-offline", "vault-deposit-world-name", "vault-deposit-world-offline" -> "插件增加";
+            case "vault-withdraw-name", "vault-withdraw-offline", "vault-withdraw-world-name", "vault-withdraw-world-offline" -> "插件扣除";
+            case "cmi-balance-event" -> "CMI 余额变动";
+            case "scan-local-change" -> "本地余额变动";
+            default -> normalized;
+        };
     }
 
     private String currencyDisplayName(String currencyId) {
@@ -1983,9 +2169,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private record NoticeMark(BigDecimal delta, BigDecimal balance, long notifiedAtMillis) {
-    }
-
-    private record RevisionNoticeMark(long revision, long markedAtMillis) {
     }
 
     private static final class SyncThreadFactory implements ThreadFactory {

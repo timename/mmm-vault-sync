@@ -2,10 +2,12 @@ local\mmm\vaultsync\api\VaultSyncCurrencyBalanceChangeEvent.class
 local\mmm\vaultsync\api\VaultSyncPhaseChangeEvent.class
 local\mmm\vaultsync\RedisSyncManager$1.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$CurrencyState.class
+local\mmm\vaultsync\BalanceWriteResult.class
 local\mmm\vaultsync\SyncConfig.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$1.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$CheckedSupplier.class
 local\mmm\vaultsync\RedisSyncConfig.class
+local\mmm\vaultsync\BalanceChangeRecord.class
 local\mmm\vaultsync\MMMVaultSyncPlugin.class
 local\mmm\vaultsync\api\SyncPhase.class
 local\mmm\vaultsync\CurrencyDefinition.class
@@ -15,7 +17,6 @@ local\mmm\vaultsync\MMMVaultSyncPlugin$MutationType.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$NoticeMark.class
 local\mmm\vaultsync\RedisSyncManager$RedisThreadFactory.class
 local\mmm\vaultsync\SyncEconomyProxy.class
-local\mmm\vaultsync\MMMVaultSyncPlugin$RevisionNoticeMark.class
 local\mmm\vaultsync\BalanceRecord.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$PlayerState.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$SyncThreadFactory.class

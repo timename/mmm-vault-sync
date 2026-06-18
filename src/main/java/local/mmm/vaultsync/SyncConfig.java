@@ -11,6 +11,7 @@ public record SyncConfig(
         int poolSize,
         long connectTimeoutMillis,
         String tableName,
+        String changeTableName,
         long joinLoadDelayTicks,
         long localScanIntervalTicks,
         long remoteRefreshIntervalMillis,
