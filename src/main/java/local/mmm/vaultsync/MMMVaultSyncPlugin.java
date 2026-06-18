@@ -59,7 +59,8 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private static final List<String> SUBCOMMANDS = List.of(
             "help", "reload", "status", "sync", "maintenance", "drain", "verify", "balance", "bal", "currencies"
     );
-    private static final List<String> BALANCE_ACTIONS = List.of("query", "q", "set", "add", "take");
+    private static final List<String> BALANCE_QUERY_ACTIONS = List.of("query", "q");
+    private static final List<String> BALANCE_MUTATION_ACTIONS = List.of("set", "add", "take");
     private static final long BALANCE_NOTICE_SUPPRESSION_MILLIS = 30_000L;
     private static final long RELOAD_CONFIRM_WINDOW_MILLIS = 15_000L;
     private static final long DRAIN_WAIT_TIMEOUT_MILLIS = 15_000L;
@@ -77,6 +78,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private SyncConfig config;
     private BalanceStore store;
     private RedisSyncManager redisSyncManager;
+    private VaultSyncPlaceholderExpansion placeholderExpansion;
     private BukkitTask scanTask;
     private volatile boolean maintenanceMode;
     private volatile boolean drainCompleted;
@@ -120,6 +122,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
         registerServicesIfNeeded();
         registerCmiBalanceListenerIfPresent();
+        registerPlaceholderExpansionIfPresent();
     }
 
     @Override
@@ -131,6 +134,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             getLogger().log(Level.WARNING, "插件关闭时刷新玩家余额失败", exception);
         }
         unregisterServices();
+        unregisterPlaceholderExpansion();
         if (redisSyncManager != null) {
             redisSyncManager.close();
             redisSyncManager = null;
@@ -203,15 +207,18 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private void sendHelp(CommandSender sender) {
         sender.sendMessage(lang.info("command.help-title", Map.of()));
         sender.sendMessage(lang.info("command.usage.help", Map.of()));
-        sender.sendMessage(lang.info("command.usage.main", Map.of()));
+        sender.sendMessage(lang.info("command.usage.help-syntax", Map.of()));
+        sender.sendMessage(lang.text("command.group.general", Map.of()));
         sender.sendMessage(lang.info("command.help.reload", Map.of()));
         sender.sendMessage(lang.info("command.help.status", Map.of()));
         sender.sendMessage(lang.info("command.help.sync", Map.of()));
-        sender.sendMessage(lang.info("command.help.balance", Map.of()));
+        sender.sendMessage(lang.info("command.help.currencies", Map.of()));
+        sender.sendMessage(lang.text("command.group.balance", Map.of()));
+        sender.sendMessage(lang.info("command.help.balance-query", Map.of()));
         sender.sendMessage(lang.info("command.help.balance-admin", Map.of()));
         sender.sendMessage(lang.info("command.help.bal", Map.of()));
+        sender.sendMessage(lang.text("command.group.maintenance", Map.of()));
         sender.sendMessage(lang.info("command.help.maintenance", Map.of()));
-        sender.sendMessage(lang.info("command.help.currencies", Map.of()));
     }
 
     @Override
@@ -234,28 +241,33 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
         if (args.length == 3 && "bal".equalsIgnoreCase(args[0])) {
             List<String> candidates = new ArrayList<>(getCurrencies().keySet());
-            candidates.add("query");
-            candidates.add("q");
             return filterByPrefix(candidates, args[2]);
         }
         if (args.length == 3 && "balance".equalsIgnoreCase(args[0])) {
-            List<String> candidates = new ArrayList<>(BALANCE_ACTIONS);
-            candidates.addAll(getCurrencies().keySet());
+            List<String> candidates = new ArrayList<>(BALANCE_QUERY_ACTIONS);
+            candidates.addAll(BALANCE_MUTATION_ACTIONS);
             return filterByPrefix(candidates, args[2]);
         }
         if (args.length == 3 && "sync".equalsIgnoreCase(args[0])) {
             return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[2]);
         }
-        if (args.length == 4 && "bal".equalsIgnoreCase(args[0]) && isBalanceQueryAction(args[2])) {
+        if (args.length == 4 && "bal".equalsIgnoreCase(args[0])) {
             return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[3]);
         }
         if (args.length == 4 && "balance".equalsIgnoreCase(args[0]) && isBalanceQueryAction(args[2])) {
             return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[3]);
         }
+        if (args.length == 4 && "balance".equalsIgnoreCase(args[0]) && isBalanceMutationAction(args[2])) {
+            return filterByPrefix(balanceAmountSuggestions(), args[3]);
+        }
         if (args.length == 5 && "balance".equalsIgnoreCase(args[0]) && isBalanceMutationAction(args[2])) {
             return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[4]);
         }
         return Collections.emptyList();
+    }
+
+    private List<String> balanceAmountSuggestions() {
+        return List.of("1", "10", "100", "1000");
     }
 
     @EventHandler
@@ -357,6 +369,28 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         return mutateBalanceAsync(playerId, normalizeCurrencyId(currencyId), normalizeAmount(amount), MutationType.TAKE, reason);
     }
 
+    BigDecimal getBalanceSnapshot(UUID playerId, String currencyId) {
+        String normalizedCurrencyId = normalizeCurrencyId(currencyId);
+        CurrencyDefinition currency = getCurrencies().get(normalizedCurrencyId);
+        if (currency == null) {
+            return BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
+        }
+        Player online = Bukkit.getPlayer(playerId);
+        if (online != null && normalizedCurrencyId.equals(config.defaultCurrencyId())) {
+            return getBackendBalance(online);
+        }
+        PlayerState state = states.get(playerId);
+        CurrencyState currencyState = state == null ? null : state.stateFor(normalizedCurrencyId);
+        if (currencyState != null && currencyState.lastObservedBalance != null) {
+            return currencyState.lastObservedBalance;
+        }
+        return currency.normalizedStartingBalance();
+    }
+
+    String formatCurrencyAmount(CurrencyDefinition currency, BigDecimal amount) {
+        return formatAmount(currency, amount);
+    }
+
     private void sendStatus(CommandSender sender) {
         sender.sendMessage(lang.info("status.title", Map.of()));
         sender.sendMessage(lang.text("status.server-id", Map.of("server", config.serverId())));
@@ -415,7 +449,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
     private boolean handleBalanceCommand(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage(lang.info("command.usage.balance", Map.of()));
+            sender.sendMessage(lang.info("command.usage.balance-query", Map.of()));
             return true;
         }
 
@@ -432,12 +466,12 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         String action = args.length >= 3 ? args[2].toLowerCase(Locale.ROOT) : "query";
         if (isBalanceQueryAction(action)) {
-            sender.sendMessage(lang.info("command.usage.balance", Map.of()));
+            sender.sendMessage(lang.info("command.usage.balance-query", Map.of()));
             return true;
         }
 
         if (args.length < 4 || args.length > 5) {
-            sender.sendMessage(lang.info("command.usage.balance", Map.of()));
+            sender.sendMessage(lang.info("command.usage.balance-admin", Map.of()));
             return true;
         }
 
@@ -466,7 +500,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         };
 
         if (future == null) {
-            sender.sendMessage(lang.info("command.usage.balance", Map.of()));
+            sender.sendMessage(lang.info("command.usage.balance-admin", Map.of()));
             return true;
         }
 
@@ -1341,6 +1375,27 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         getServer().getServicesManager().unregister(Economy.class, this);
         getServer().getServicesManager().unregister(VaultSyncStateService.class, this);
         getServer().getServicesManager().unregister(VaultSyncCurrencyService.class, this);
+    }
+
+    private void registerPlaceholderExpansionIfPresent() {
+        if (placeholderExpansion != null) {
+            return;
+        }
+        Plugin placeholderApi = Bukkit.getPluginManager().getPlugin("PlaceholderAPI");
+        if (placeholderApi == null || !placeholderApi.isEnabled()) {
+            return;
+        }
+        placeholderExpansion = new VaultSyncPlaceholderExpansion(this);
+        placeholderExpansion.register();
+        getLogger().info("已注册 PlaceholderAPI 变量: %mmmvaultsync_*%");
+    }
+
+    private void unregisterPlaceholderExpansion() {
+        if (placeholderExpansion == null) {
+            return;
+        }
+        placeholderExpansion.unregister();
+        placeholderExpansion = null;
     }
 
     private void registerCmiBalanceListenerIfPresent() {

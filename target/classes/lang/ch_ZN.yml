@@ -1,4 +1,4 @@
-prefix:
+﻿prefix:
   info: "&6[MMMVaultSync] &e"
   warn: "&6[MMMVaultSync] &c"
   ok: "&6[MMMVaultSync] &a"
@@ -6,20 +6,24 @@ prefix:
 command:
   no-permission: "你没有权限使用这个命令。"
   help-title: "MMMVaultSync 命令帮助"
-  usage.help: "用法: &f/mmmvaultsync help"
-  usage.main: "用法: &f/mmmvaultsync <help|reload|status|sync|maintenance|drain|verify|balance|bal|currencies>"
+  group.general: "&8[&e基础命令&8]"
+  group.balance: "&8[&e余额命令&8]"
+  group.maintenance: "&8[&e维护命令&8]"
+  usage.main: "用法: &f/mmmvaultsync help"
+  usage.help-syntax: "下面按用途列出可用命令。所有命令需要 &fmmmvaultsync.admin&e 权限。"
   usage.sync: "用法: &f/mmmvaultsync sync <玩家> [货币ID]"
   usage.maintenance: "用法: &f/mmmvaultsync maintenance <on|off>"
-  usage.balance: "用法: &f/mmmvaultsync balance <玩家> [货币ID]"
+  usage.balance-query: "用法: &f/mmmvaultsync balance <玩家> [货币ID]"
+  usage.balance-admin: "用法: &f/mmmvaultsync balance <玩家> <set|add|take> <金额> [货币ID]"
   usage.balance-short: "用法: &f/mmmvaultsync bal <玩家> [货币ID]"
-  help.reload: "&7- &freload &7重新加载配置，维护流程中需配合 &fconfirm"
-  help.status: "&7- &fstatus &7查看当前阶段与同步状态"
-  help.sync: "&7- &fsync <玩家> [货币ID] &7拉取指定玩家的权威余额"
-  help.balance: "&7- &fbalance <玩家> [货币ID] &7查询余额"
-  help.balance-admin: "&7- &fbalance <玩家> <set|add|take> <金额> [货币ID] &7修改余额"
-  help.bal: "&7- &fbal <玩家> [货币ID] &7查询余额（短命令）"
-  help.maintenance: "&7- &fmaintenance on|off &7、&fdrain &7、&fverify &7、&freload confirm"
-  help.currencies: "&7- &fcurrencies &7查看已加载的货币"
+  help.reload: "&7- &freload &7重载配置与语言文件，维护流程中需要配合 &fconfirm &7确认"
+  help.status: "&7- &fstatus &7查看当前阶段、同步状态与维护信息"
+  help.sync: "&7- &fsync <玩家> [货币ID] &7同步指定玩家的权威余额到本地"
+  help.balance-query: "&7- &fbalance <玩家> [货币ID] &7查询玩家余额"
+  help.balance-admin: "&7- &fbalance <玩家> <set|add|take> <金额> [货币ID] &7管理员修改玩家余额"
+  help.bal: "&7- &fbal <玩家> [货币ID] &7余额查询短命令"
+  help.maintenance: "&7- &fmaintenance on|off &7切换维护模式；&fdrain &7排空写入；&fverify &7校验；&freload confirm &7重载"
+  help.currencies: "&7- &fcurrencies &7查看已加载的货币列表"
   player-offline: "目标玩家当前不在线。"
   player-not-found: "找不到玩家 &f{player}&c。"
   sync-requested: "已请求同步玩家 &f{player}&a 的 &f{currency}&a。"
@@ -100,3 +104,8 @@ balance:
 player:
   balance-added: "你的 &f{currency}&e 增加了 &a{amount}&e，当前余额: &f{balance}"
   balance-removed: "你的 &f{currency}&e 扣除了 &c{amount}&e，当前余额: &f{balance}"
+
+
+
+
+

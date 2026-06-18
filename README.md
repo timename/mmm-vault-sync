@@ -2,9 +2,23 @@
 
 ## Version
 
-当前版本：`3.0.0`
+当前版本：`3.1.0`
 
 ## 更新内容
+
+### 3.1.0
+
+- 新增 PlaceholderAPI 支持，用于菜单、聊天、计分板等插件展示余额和同步状态。
+- 新增 `%mmmvaultsync_balance%`、`%mmmvaultsync_balance_<货币ID>%` 等显示变量。
+- 明确 PAPI 变量只用于显示；其他插件操作货币应继续使用 `VaultSyncCurrencyService` API。
+
+### 3.0.1
+
+- 优化 `/mmmvaultsync help` 显示，不再输出一整串难读的子命令总览。
+- 补充消息变量说明，明确 `{balance}` 是当前余额变量。
+- 明确余额查询和余额修改命令都需要 `mmmvaultsync.admin` 权限。
+- 补充其他插件接入建议：插件联动应使用 API，不应调用管理员命令。
+- 优化余额命令的 TAB 补全提示。
 
 ### 3.0.0
 
@@ -56,7 +70,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.0.0.jar](target/mmm-vault-sync-3.0.0.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.1.0.jar](target/mmm-vault-sync-3.1.0.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -175,6 +189,56 @@ mmmvaultsync.admin
 - 不填写货币 ID 时，默认操作 `default`
 - `default` 表示主货币
 - 其他货币 ID 表示插件自管货币
+- 余额查询和余额修改都需要 `mmmvaultsync.admin`
+
+### 消息变量
+
+这些变量用于 `lang/ch_ZN.yml` 的提示文本：
+
+```text
+{player}  玩家名
+{currency}  货币显示名
+{reason}  操作原因
+{server}  服务器标识
+{phase}  当前阶段
+{count}  数量统计
+{ticks}  Tick 间隔
+{millis}  毫秒间隔
+{value}  布尔/枚举值
+{detail}  失败详情
+{amount}  金额变化值
+{balance}  当前余额
+{id}  货币 ID
+{name}  货币名称
+{symbol}  货币符号
+{type}  货币类型
+```
+
+### PlaceholderAPI 变量
+
+如果服务器安装了 PlaceholderAPI，插件会自动注册 `mmmvaultsync` 变量。  
+这些变量适合菜单、聊天、计分板、称号等插件显示信息，不适合做发钱、扣钱或交易逻辑。
+
+```text
+%mmmvaultsync_balance%
+%mmmvaultsync_balance_default%
+%mmmvaultsync_balance_<货币ID>%
+%mmmvaultsync_currency_name_<货币ID>%
+%mmmvaultsync_currency_symbol_<货币ID>%
+%mmmvaultsync_default_currency%
+%mmmvaultsync_currency_count%
+%mmmvaultsync_phase%
+%mmmvaultsync_maintenance%
+%mmmvaultsync_drain%
+%mmmvaultsync_verify%
+```
+
+说明：
+
+- `%mmmvaultsync_balance%` 等同于 `%mmmvaultsync_balance_default%`
+- `%mmmvaultsync_balance_<货币ID>%` 显示指定货币余额，例如 `%mmmvaultsync_balance_gems%`
+- PAPI 读取的是插件当前缓存/在线快照，不会为了显示变量阻塞等待数据库查询
+- 其他插件要修改余额时，必须使用 `VaultSyncCurrencyService` API
 
 ### 安全维护流程
 
@@ -253,6 +317,21 @@ local.mmm.vaultsync.api.VaultSyncCurrencyService
 - 查询玩家余额
 - 修改自管货币或默认货币
 
+其他插件应通过 Bukkit ServicesManager 获取服务：
+
+```java
+RegisteredServiceProvider<VaultSyncCurrencyService> provider =
+        Bukkit.getServicesManager().getRegistration(VaultSyncCurrencyService.class);
+if (provider == null || !provider.getProvider().canAcceptEconomicOperations()) {
+    return;
+}
+
+VaultSyncCurrencyService service = provider.getProvider();
+service.addBalanceAsync(playerId, service.getDefaultCurrencyId(), BigDecimal.valueOf(100), "reward-plugin");
+```
+
+不要在插件联动里执行 `/mmmvaultsync balance ...` 管理员命令。命令只用于人工管理；插件应直接调用 API，避免权限、文本解析和跨线程问题。
+
 ### 事件
 
 ```text
@@ -271,8 +350,9 @@ local.mmm.vaultsync.api.VaultSyncCurrencyBalanceChangeEvent
 
 1. 在执行经济操作前先读取 `VaultSyncStateService` 或 `VaultSyncCurrencyService`
 2. 如果插件不在 `NORMAL` 阶段，就暂缓交易或资金结算
-3. 默认货币继续走 Vault 生态
-4. 新增业务货币优先直接走 MMMVaultSync 的自管多货币 API
+3. 不要用 `/mmmvaultsync balance ...` 这种管理员命令来做插件联动
+4. 默认货币继续走 Vault 生态
+5. 新增业务货币优先直接走 MMMVaultSync 的自管多货币 API
 
 这样做的好处是：
 
@@ -292,7 +372,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.0.0.jar
+target/mmm-vault-sync-3.1.0.jar
 ```
 
 ## 当前建议
