@@ -654,6 +654,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         registerServicesIfNeeded();
         registerCmiBalanceListenerIfPresent();
+        registerPlaceholderExpansionIfPresent();
         sender.sendMessage(lang.ok("setup.ready", Map.of()));
         return true;
     }
@@ -812,6 +813,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         resyncTrackedPlayersAfterReload();
         restartScanTask();
         setPhase(maintenanceMode ? SyncPhase.MAINTENANCE : SyncPhase.NORMAL);
+        registerServicesIfNeeded();
+        registerCmiBalanceListenerIfPresent();
+        registerPlaceholderExpansionIfPresent();
         return true;
     }
 

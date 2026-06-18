@@ -2,9 +2,17 @@
 
 ## Version
 
-当前版本：`3.1.0`
+当前版本：`3.1.2`
 
 ## 更新内容
+
+### 3.1.2
+
+- 修复首次进入待配置模式后，通过 `/mmmvaultsync reload` 完成初始化时没有注册 PlaceholderAPI 变量的问题。
+
+### 3.1.1
+
+- 补充 PlaceholderAPI 变量说明，逐项说明每个变量的含义和示例。
 
 ### 3.1.0
 
@@ -70,7 +78,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.1.0.jar](target/mmm-vault-sync-3.1.0.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.1.2.jar](target/mmm-vault-sync-3.1.2.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -233,6 +241,22 @@ mmmvaultsync.admin
 %mmmvaultsync_verify%
 ```
 
+变量说明：
+
+| 变量 | 含义 | 示例 |
+| --- | --- | --- |
+| `%mmmvaultsync_balance%` | 当前玩家的默认货币余额，等同于 `default` 货币 | `1234.5` |
+| `%mmmvaultsync_balance_default%` | 当前玩家的默认货币余额 | `1234.5` |
+| `%mmmvaultsync_balance_<货币ID>%` | 当前玩家指定货币的余额，把 `<货币ID>` 换成实际 ID | `%mmmvaultsync_balance_gems%` |
+| `%mmmvaultsync_currency_name_<货币ID>%` | 指定货币的显示名称 | `%mmmvaultsync_currency_name_gems%` -> `宝石` |
+| `%mmmvaultsync_currency_symbol_<货币ID>%` | 指定货币的符号 | `%mmmvaultsync_currency_symbol_gems%` -> `◆` |
+| `%mmmvaultsync_default_currency%` | 默认货币 ID | `default` |
+| `%mmmvaultsync_currency_count%` | 当前已加载的货币数量，包含默认货币 | `2` |
+| `%mmmvaultsync_phase%` | 插件当前同步阶段 | `NORMAL` |
+| `%mmmvaultsync_maintenance%` | 是否处于维护模式 | `true` / `false` |
+| `%mmmvaultsync_drain%` | 当前 drain 是否完成 | `true` / `false` |
+| `%mmmvaultsync_verify%` | 当前 verify 是否完成 | `true` / `false` |
+
 说明：
 
 - `%mmmvaultsync_balance%` 等同于 `%mmmvaultsync_balance_default%`
@@ -372,7 +396,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.1.0.jar
+target/mmm-vault-sync-3.1.2.jar
 ```
 
 ## 当前建议
