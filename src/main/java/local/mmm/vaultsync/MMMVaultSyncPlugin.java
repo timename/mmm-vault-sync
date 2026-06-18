@@ -74,6 +74,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private SyncEconomyProxy syncEconomyProxy;
     private SyncConfig config;
     private BalanceStore store;
+    private RedisSyncManager redisSyncManager;
     private BukkitTask scanTask;
     private volatile boolean maintenanceMode;
     private volatile boolean drainCompleted;
@@ -128,6 +129,10 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             getLogger().log(Level.WARNING, "插件关闭时刷新玩家余额失败", exception);
         }
         unregisterServices();
+        if (redisSyncManager != null) {
+            redisSyncManager.close();
+            redisSyncManager = null;
+        }
         if (store != null) {
             store.close();
             store = null;
@@ -641,10 +646,18 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         BalanceStore oldStore = this.store;
         BalanceStore newStore = new BalanceStore(newConfig);
+        RedisSyncManager oldRedis = this.redisSyncManager;
+        RedisSyncManager newRedis = createRedisSyncManager(newConfig);
         try {
             newStore.ensureSchema();
+            if (newRedis != null) {
+                newRedis.start();
+            }
         } catch (SQLException exception) {
             newStore.close();
+            if (newRedis != null) {
+                newRedis.close();
+            }
             if (oldStore != null) {
                 this.store = oldStore;
             }
@@ -658,9 +671,13 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         this.config = newConfig;
         this.store = newStore;
+        this.redisSyncManager = newRedis;
         lang.reload(newConfig.language());
         if (oldStore != null) {
             oldStore.close();
+        }
+        if (oldRedis != null) {
+            oldRedis.close();
         }
 
         ensureEconomyProxyRegistered();
@@ -727,7 +744,8 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 getConfig().getBoolean("logging.debug", false),
                 DEFAULT_CURRENCY_ID,
                 defaultCurrency,
-                Collections.unmodifiableMap(currencies)
+                Collections.unmodifiableMap(currencies),
+                loadRedisConfig()
         );
     }
 
@@ -890,6 +908,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                     } else if (record != null) {
                         state.knownRevision = Math.max(state.knownRevision, record.revision());
                         state.lastObservedBalance = record.balance();
+                        publishRedisBalanceChange(record.uuid(), record.currencyId(), record.revision());
                     }
 
                     if (state.pendingWriteBalance != null) {
@@ -933,8 +952,54 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                     .exceptionally(throwable -> {
                         log(Level.WARNING, "刷新自管货币失败: " + uuid + ", currency=" + currencyId + ", reason=" + reason, throwable);
                         return null;
-                    });
+                });
         }
+    }
+
+    private RedisSyncManager createRedisSyncManager(SyncConfig syncConfig) {
+        RedisSyncConfig redisConfig = syncConfig.redisSync();
+        if (redisConfig == null || !redisConfig.enabled()) {
+            return null;
+        }
+        return new RedisSyncManager(this, redisConfig, this::handleRedisBalanceChange);
+    }
+
+    private RedisSyncConfig loadRedisConfig() {
+        ConfigurationSection redis = getConfig().getConfigurationSection("redis");
+        if (redis == null) {
+            return new RedisSyncConfig(false, "127.0.0.1", 6379, "", 0, "mmm:vaultsync:balance", 3000L);
+        }
+        return new RedisSyncConfig(
+                redis.getBoolean("enabled", false),
+                redis.getString("host", "127.0.0.1"),
+                redis.getInt("port", 6379),
+                redis.getString("password", ""),
+                redis.getInt("database", 0),
+                redis.getString("channel", "mmm:vaultsync:balance"),
+                redis.getLong("reconnect-delay-millis", 3000L)
+        );
+    }
+
+    private void publishRedisBalanceChange(UUID playerId, String currencyId, long revision) {
+        if (redisSyncManager == null || !redisSyncManager.isEnabled()) {
+            return;
+        }
+        redisSyncManager.publishBalanceChange(playerId, currencyId, revision, config.serverId());
+    }
+
+    private void handleRedisBalanceChange(RedisBalanceChangeMessage message) {
+        if (message == null || config == null) {
+            return;
+        }
+        if (message.sourceServerId().equalsIgnoreCase(config.serverId())) {
+            return;
+        }
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (store == null || setupRequired) {
+                return;
+            }
+            scheduleAuthoritativeLoad(message.playerId(), "redis", message.currencyId());
+        });
     }
 
     private void flushOnlinePlayersBlocking(String reason) {
@@ -1287,6 +1352,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             }
 
             BalanceRecord record = store.writeSnapshot(playerId, currencyId, target, knownRevision, config.serverId());
+            publishRedisBalanceChange(record.uuid(), record.currencyId(), record.revision());
             return new BalanceMutationResult(
                     true,
                     "ok",

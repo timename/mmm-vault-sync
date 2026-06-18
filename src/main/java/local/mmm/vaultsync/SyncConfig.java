@@ -20,6 +20,7 @@ public record SyncConfig(
         boolean debugLogging,
         String defaultCurrencyId,
         CurrencyDefinition defaultCurrency,
-        Map<String, CurrencyDefinition> currencies
+        Map<String, CurrencyDefinition> currencies,
+        RedisSyncConfig redisSync
 ) {
 }

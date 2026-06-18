@@ -1,5 +1,14 @@
 # MMMVaultSync
 
+## Version
+
+当前版本：`2.1.0`
+
+Redis 同步说明：
+- MySQL 继续作为权威存储。
+- Redis 只负责跨服事件广播。
+- 子服收到事件后会回拉数据库刷新本地状态。
+
 适用于 `Velocity + Paper/Purpur` 联机架构的跨服经济同步插件。
 
 当前版本：`2.0.0`
