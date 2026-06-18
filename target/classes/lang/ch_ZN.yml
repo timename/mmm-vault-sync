@@ -5,10 +5,21 @@ prefix:
 
 command:
   no-permission: "你没有权限使用这个命令。"
-  usage.main: "用法: &f/mmmvaultsync reload|status|sync|maintenance|drain|verify|balance|currencies"
+  help-title: "MMMVaultSync 命令帮助"
+  usage.help: "用法: &f/mmmvaultsync help"
+  usage.main: "用法: &f/mmmvaultsync <help|reload|status|sync|maintenance|drain|verify|balance|bal|currencies>"
   usage.sync: "用法: &f/mmmvaultsync sync <玩家> [货币ID]"
   usage.maintenance: "用法: &f/mmmvaultsync maintenance <on|off>"
-  usage.balance: "用法: &f/mmmvaultsync balance <玩家> <query|set|add|take> [金额] [货币ID]"
+  usage.balance: "用法: &f/mmmvaultsync balance <玩家> [货币ID]"
+  usage.balance-short: "用法: &f/mmmvaultsync bal <玩家> [货币ID]"
+  help.reload: "&7- &freload &7重新加载配置，维护流程中需配合 &fconfirm"
+  help.status: "&7- &fstatus &7查看当前阶段与同步状态"
+  help.sync: "&7- &fsync <玩家> [货币ID] &7拉取指定玩家的权威余额"
+  help.balance: "&7- &fbalance <玩家> [货币ID] &7查询余额"
+  help.balance-admin: "&7- &fbalance <玩家> <set|add|take> <金额> [货币ID] &7修改余额"
+  help.bal: "&7- &fbal <玩家> [货币ID] &7查询余额（短命令）"
+  help.maintenance: "&7- &fmaintenance on|off &7、&fdrain &7、&fverify &7、&freload confirm"
+  help.currencies: "&7- &fcurrencies &7查看已加载的货币"
   player-offline: "目标玩家当前不在线。"
   player-not-found: "找不到玩家 &f{player}&c。"
   sync-requested: "已请求同步玩家 &f{player}&a 的 &f{currency}&a。"
@@ -84,6 +95,7 @@ balance:
   change-failed: "修改玩家 &f{player}&c 的余额失败。"
   change-failed-detail: "修改余额失败: &f{detail}"
   change-success: "已更新玩家 &f{player}&a 的 &f{currency}&a，当前余额: &f{balance}"
+  short-query-only: "短命令 &f/bal&c 仅用于查询余额。"
 
 player:
   balance-added: "你的 &f{currency}&e 增加了 &a{amount}&e，当前余额: &f{balance}"

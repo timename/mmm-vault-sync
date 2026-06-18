@@ -11,6 +11,7 @@ local\mmm\vaultsync\api\SyncPhase.class
 local\mmm\vaultsync\CurrencyDefinition.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$VerifyResult.class
 local\mmm\vaultsync\MMMVaultSyncPlugin$MutationType.class
+local\mmm\vaultsync\MMMVaultSyncPlugin$NoticeMark.class
 local\mmm\vaultsync\RedisSyncManager$RedisThreadFactory.class
 local\mmm\vaultsync\SyncEconomyProxy.class
 local\mmm\vaultsync\BalanceRecord.class

@@ -2,7 +2,17 @@
 
 ## Version
 
-当前版本：`2.1.0`
+当前版本：`3.0.0`
+
+## 更新内容
+
+### 3.0.0
+
+- 优化周期远端刷新：常规 `periodic` 刷新只拉取默认货币，避免在线玩家定时刷新时全量查询所有自管货币。
+- 修复数据库无余额记录时单货币加载可能因为 `Map.of(..., null)` 抛出异常的问题。
+- 简化余额查询命令解析，`balance` 和 `bal` 共用查询参数规则。
+- 优化余额变动提示抑制逻辑，减少字符串分配，并清理过期提示状态。
+- 余额比较改为 BigDecimal 原生比较，避免转 double 带来的精度偏差。
 
 Redis 同步说明：
 - MySQL 继续作为权威存储。
@@ -46,7 +56,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-2.0.0.jar](target/mmm-vault-sync-2.0.0.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.0.0.jar](target/mmm-vault-sync-3.0.0.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -153,7 +163,8 @@ mmmvaultsync.admin
 ### 余额管理命令
 
 ```text
-/mmmvaultsync balance <玩家> query [货币ID]
+/mmmvaultsync balance <玩家> [货币ID]
+/mmmvaultsync bal <玩家> [货币ID]
 /mmmvaultsync balance <玩家> set <金额> [货币ID]
 /mmmvaultsync balance <玩家> add <金额> [货币ID]
 /mmmvaultsync balance <玩家> take <金额> [货币ID]
@@ -281,7 +292,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-2.0.0.jar
+target/mmm-vault-sync-3.0.0.jar
 ```
 
 ## 当前建议
