@@ -64,9 +64,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
     private static final String ADMIN_PERMISSION = "mmmvaultsync.admin";
     private static final List<String> SUBCOMMANDS = List.of(
-            "help", "reload", "status", "sync", "maintenance", "drain", "verify", "balance", "bal", "changes", "currencies"
+            "help", "reload", "status", "sync", "maintenance", "drain", "verify", "balance", "changes", "currencies"
     );
-    private static final List<String> BALANCE_QUERY_ACTIONS = List.of("query", "q");
+    private static final List<String> BALANCE_QUERY_ACTIONS = List.of("query");
     private static final List<String> BALANCE_MUTATION_ACTIONS = List.of("set", "add", "take");
     private static final long BALANCE_NOTICE_SUPPRESSION_MILLIS = 30_000L;
     private static final long RELOAD_CONFIRM_WINDOW_MILLIS = 15_000L;
@@ -207,7 +207,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             case "drain" -> handleDrainCommand(sender);
             case "verify" -> handleVerifyCommand(sender);
             case "balance" -> handleBalanceCommand(sender, args);
-            case "bal" -> handleBalCommand(sender, args);
             case "changes" -> handleChangesCommand(sender, args);
             case "currencies" -> {
                 sendCurrencies(sender);
@@ -232,7 +231,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         sender.sendMessage(lang.text("command.group.balance", Map.of()));
         sender.sendMessage(lang.info("command.help.balance-query", Map.of()));
         sender.sendMessage(lang.info("command.help.balance-admin", Map.of()));
-        sender.sendMessage(lang.info("command.help.bal", Map.of()));
         sender.sendMessage(lang.info("command.help.changes", Map.of()));
         sender.sendMessage(lang.text("command.group.maintenance", Map.of()));
         sender.sendMessage(lang.info("command.help.maintenance", Map.of()));
@@ -253,7 +251,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         if (args.length == 2 && "reload".equalsIgnoreCase(args[0])) {
             return filterByPrefix(List.of("confirm"), args[1]);
         }
-        if (args.length == 2 && List.of("sync", "balance", "bal").contains(args[0].toLowerCase(Locale.ROOT))) {
+        if (args.length == 2 && List.of("sync", "balance").contains(args[0].toLowerCase(Locale.ROOT))) {
             return filterByPrefix(listKnownPlayerNames(), args[1]);
         }
         if (args.length == 2 && "changes".equalsIgnoreCase(args[0])) {
@@ -262,10 +260,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         if (args.length == 3 && "changes".equalsIgnoreCase(args[0])) {
             return filterByPrefix(List.of("5", "10", "20"), args[2]);
         }
-        if (args.length == 3 && "bal".equalsIgnoreCase(args[0])) {
-            List<String> candidates = new ArrayList<>(getCurrencies().keySet());
-            return filterByPrefix(candidates, args[2]);
-        }
         if (args.length == 3 && "balance".equalsIgnoreCase(args[0])) {
             List<String> candidates = new ArrayList<>(BALANCE_QUERY_ACTIONS);
             candidates.addAll(BALANCE_MUTATION_ACTIONS);
@@ -273,9 +267,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
         if (args.length == 3 && "sync".equalsIgnoreCase(args[0])) {
             return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[2]);
-        }
-        if (args.length == 4 && "bal".equalsIgnoreCase(args[0])) {
-            return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[3]);
         }
         if (args.length == 4 && "balance".equalsIgnoreCase(args[0]) && isBalanceQueryAction(args[2])) {
             return filterByPrefix(new ArrayList<>(getCurrencies().keySet()), args[3]);
@@ -548,32 +539,6 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         return true;
     }
 
-    private boolean handleBalCommand(CommandSender sender, String[] args) {
-        if (args.length < 2) {
-            sender.sendMessage(lang.info("command.usage.balance-short", Map.of()));
-            return true;
-        }
-
-        OfflinePlayer target = resolveOfflinePlayer(args[1]);
-        if (target == null) {
-            sender.sendMessage(lang.warn("command.player-not-found", Map.of("player", args[1])));
-            return true;
-        }
-
-        if (args.length >= 3 && isBalanceMutationAction(args[2])) {
-            sender.sendMessage(lang.warn("balance.short-query-only", Map.of()));
-            sender.sendMessage(lang.info("command.usage.balance-short", Map.of()));
-            return true;
-        }
-
-        String currencyId = parseBalanceQueryCurrency(args, 2);
-        if (currencyId == null) {
-            sender.sendMessage(lang.info("command.usage.balance-short", Map.of()));
-            return true;
-        }
-        return sendBalanceQuery(sender, target, currencyId);
-    }
-
     private boolean handleChangesCommand(CommandSender sender, String[] args) {
         if (store == null) {
             sender.sendMessage(lang.warn("setup.mode.active", Map.of()));
@@ -681,7 +646,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private boolean isBalanceQueryAction(String action) {
-        return "query".equalsIgnoreCase(action) || "q".equalsIgnoreCase(action);
+        return "query".equalsIgnoreCase(action);
     }
 
     private boolean isBalanceMutationAction(String action) {

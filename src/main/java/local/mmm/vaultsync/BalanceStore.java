@@ -257,14 +257,19 @@ public final class BalanceStore implements AutoCloseable {
             }
 
             if (maxRecordsPerPlayerCurrency > 0) {
-                String deleteOverflowSql = "DELETE changes FROM `" + changeTableName + "` changes "
+                String deleteOverflowSql = "DELETE FROM `" + changeTableName + "` "
+                        + "WHERE id IN ("
+                        + "SELECT id FROM ("
+                        + "SELECT changes.id FROM `" + changeTableName + "` changes "
                         + "WHERE ("
                         + "SELECT COUNT(*) FROM `" + changeTableName + "` newer "
                         + "WHERE newer.uuid = changes.uuid "
                         + "AND newer.currency_id = changes.currency_id "
                         + "AND (newer.created_at > changes.created_at "
                         + "OR (newer.created_at = changes.created_at AND newer.id > changes.id))"
-                        + ") >= ?";
+                        + ") >= ?"
+                        + ") overflow_changes"
+                        + ")";
                 try (PreparedStatement statement = connection.prepareStatement(deleteOverflowSql)) {
                     statement.setInt(1, maxRecordsPerPlayerCurrency);
                     deleted += statement.executeUpdate();

@@ -1,5 +1,5 @@
 name: MMMVaultSync
-version: 3.3.0
+version: 3.4.0
 main: local.mmm.vaultsync.MMMVaultSyncPlugin
 api-version: "1.21"
 author: OpenAI
@@ -12,7 +12,7 @@ softdepend:
 commands:
   mmmvaultsync:
     description: MMMVaultSync admin command
-    usage: /mmmvaultsync help | status | sync <玩家> [货币ID] | balance <玩家> [货币ID] | bal <玩家> [货币ID] | changes [玩家] [数量]
+    usage: /mmmvaultsync help | status | sync <玩家> [货币ID] | balance <玩家> [query] [货币ID] | changes [玩家] [数量]
 permissions:
   mmmvaultsync.admin:
     default: op

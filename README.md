@@ -2,9 +2,20 @@
 
 ## Version
 
-当前版本：`3.3.0`
+当前版本：`3.4.0`
 
 ## 更新内容
+
+### 3.4.0
+
+- 优化余额管理命令，只保留 `/mmmvaultsync balance` 入口。
+- 移除 `/mmmvaultsync bal` 查询短命令。
+- 移除 `/mmmvaultsync balance <玩家> q` 查询短别名，查询动作统一使用 `query`。
+
+### 3.3.1
+
+- 修复 MySQL 下清理每玩家每货币超额历史记录时报错 `You can't specify target table` 的问题。
+- 历史清理 SQL 改为通过派生表选择待删除记录，保持原有保留策略不变。
 
 ### 3.3.0
 
@@ -98,7 +109,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.3.0.jar](target/mmm-vault-sync-3.3.0.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.4.0.jar](target/mmm-vault-sync-3.4.0.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -243,7 +254,7 @@ mmmvaultsync.admin
 
 ```text
 /mmmvaultsync balance <玩家> [货币ID]
-/mmmvaultsync bal <玩家> [货币ID]
+/mmmvaultsync balance <玩家> query [货币ID]
 /mmmvaultsync balance <玩家> set <金额> [货币ID]
 /mmmvaultsync balance <玩家> add <金额> [货币ID]
 /mmmvaultsync balance <玩家> take <金额> [货币ID]
@@ -467,7 +478,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.3.0.jar
+target/mmm-vault-sync-3.4.0.jar
 ```
 
 ## 当前建议
