@@ -2,7 +2,7 @@ name: MMMVaultSync
 version: 3.5.0
 main: local.mmm.vaultsync.MMMVaultSyncPlugin
 api-version: "1.21"
-author: OpenAI
+author: Xiaomenxin
 website: https://example.invalid
 depend:
   - Vault
