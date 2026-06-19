@@ -13,6 +13,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 public final class RedisSyncManager implements AutoCloseable {
+    private static final long FAILURE_LOG_INTERVAL_MILLIS = 60_000L;
+
     private final MMMVaultSyncPlugin plugin;
     private final RedisSyncConfig config;
     private final Consumer<RedisBalanceChangeMessage> listener;
@@ -21,6 +23,8 @@ public final class RedisSyncManager implements AutoCloseable {
     private volatile JedisPool pool;
     private volatile Thread subscriberThread;
     private volatile JedisPubSub pubSub;
+    private volatile long lastPublishFailureLogMillis;
+    private volatile long lastSubscribeFailureLogMillis;
 
     public RedisSyncManager(MMMVaultSyncPlugin plugin, RedisSyncConfig config, Consumer<RedisBalanceChangeMessage> listener) {
         this.plugin = plugin;
@@ -57,8 +61,7 @@ public final class RedisSyncManager implements AutoCloseable {
             try (Jedis jedis = pool.getResource()) {
                 jedis.publish(config.channel(), payload);
             } catch (Exception exception) {
-                plugin.getLogger().warning("Redis 事件发布失败: " + exception.getMessage());
-                plugin.getLogger().warning("Redis 发布异常: " + exception.getMessage());
+                logPublishFailure(exception);
             }
         });
     }
@@ -118,11 +121,28 @@ public final class RedisSyncManager implements AutoCloseable {
                 if (!running.get()) {
                     return;
                 }
-                plugin.getLogger().warning("Redis 订阅断开，稍后重连: " + exception.getMessage());
-                plugin.getLogger().warning("Redis 订阅异常: " + exception.getMessage());
+                logSubscribeFailure(exception);
                 sleepQuietly(config.reconnectDelayMillis());
             }
         }
+    }
+
+    private void logPublishFailure(Exception exception) {
+        long now = System.currentTimeMillis();
+        if (now - lastPublishFailureLogMillis < FAILURE_LOG_INTERVAL_MILLIS) {
+            return;
+        }
+        lastPublishFailureLogMillis = now;
+        plugin.getLogger().warning("Redis 事件发布失败，60 秒内同类错误将合并输出: " + exception.getMessage());
+    }
+
+    private void logSubscribeFailure(Exception exception) {
+        long now = System.currentTimeMillis();
+        if (now - lastSubscribeFailureLogMillis < FAILURE_LOG_INTERVAL_MILLIS) {
+            return;
+        }
+        lastSubscribeFailureLogMillis = now;
+        plugin.getLogger().warning("Redis 订阅断开，稍后自动重连，60 秒内同类错误将合并输出: " + exception.getMessage());
     }
 
     private void sleepQuietly(long millis) {

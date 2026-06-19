@@ -38,13 +38,21 @@ database:
   change-table: mmm_vault_sync_balance_changes
 
 redis:
-  # Redis 用于跨服实时刷新；历史记录和提示去重由 MySQL 负责
-  enabled: false
+  # 是否启用 Redis 实时同步
+  # 开启后，余额写入 MySQL 后会通过 Redis 通知其他子服立即回拉最新余额
+  # Redis 只负责实时通知，MySQL 仍然是权威存储；Redis 故障时会退回周期刷新
+  enabled: true
+  # Redis 地址；多机器部署时请填写所有子服都能访问到的 Redis 地址
   host: 127.0.0.1
+  # Redis 端口
   port: 6379
+  # Redis 密码；没有密码时保持空字符串
   password: ""
+  # Redis 数据库编号
   database: 0
+  # Redis 频道；同一组需要同步的子服必须保持一致
   channel: mmm:vaultsync:balance
+  # Redis 断线后重连间隔，单位毫秒
   reconnect-delay-millis: 3000
 
 # 默认货币 = Vault / CMI 主货币
@@ -54,6 +62,10 @@ default-currency:
   symbol: ""
   # 玩家余额变化时是否发送提示
   notify-on-change: true
+  # 是否通过 Redis 实时同步本货币
+  # true: 写入后立即通知其他子服刷新，适合金币等需要实时到账的货币
+  # false: 不发送 Redis 事件，只依赖进服/手动同步/周期刷新
+  realtime-sync: true
 
 # 额外自管货币
 # 说明：
@@ -65,7 +77,11 @@ currencies:
     display-name: 宝石
     symbol: "◇"
     starting-balance: 0
+    # 玩家余额变化时是否发送提示
     notify-on-change: true
+    # 是否通过 Redis 实时同步本货币
+    # 需要 redis.enabled: true 才会生效
+    realtime-sync: true
 
 sync:
   # 玩家进服后延迟多少 tick 再拉取一次权威余额

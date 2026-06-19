@@ -2,9 +2,16 @@
 
 ## Version
 
-当前版本：`3.4.0`
+当前版本：`3.5.0`
 
 ## 更新内容
+
+### 3.5.0
+
+- 新增每种货币独立的 Redis 实时同步开关 `realtime-sync`。
+- 默认货币和自管货币默认开启实时同步，配合 `redis.enabled` 使用。
+- 新生成配置默认开启 Redis，并补充中文注释说明。
+- Redis 发布/订阅失败日志增加限频，避免 Redis 未启动时刷屏。
 
 ### 3.4.0
 
@@ -109,7 +116,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.4.0.jar](target/mmm-vault-sync-3.4.0.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.5.0.jar](target/mmm-vault-sync-3.5.0.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -230,9 +237,22 @@ history:
 
 ### Redis
 
-Redis 是可选的跨服实时刷新通道。开启后，某个子服写入新余额 revision 时，会广播事件给其他子服，让其他子服更快回拉 MySQL。
+Redis 是跨服实时刷新通道。开启后，某个子服写入新余额 revision 时，会广播事件给其他子服，让其他子服更快回拉 MySQL。
 
 提示去重不依赖 Redis，而是依赖 MySQL 历史表。因此 Redis 未开启时，余额仍能通过周期刷新同步，并且同一条历史记录仍不会重复提示；只是跨服刷新速度取决于 `sync.remote-refresh-interval-seconds`。
+
+从 `3.5.0` 起，每种货币都可以单独控制是否发送 Redis 实时同步事件：
+
+```yml
+default-currency:
+  realtime-sync: true
+
+currencies:
+  gems:
+    realtime-sync: true
+```
+
+`redis.enabled` 是总开关；单个货币的 `realtime-sync` 是货币级开关。两者都开启时，该货币才会发布 Redis 实时同步事件。
 
 ## 命令
 
@@ -478,7 +498,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.4.0.jar
+target/mmm-vault-sync-3.5.0.jar
 ```
 
 ## 当前建议

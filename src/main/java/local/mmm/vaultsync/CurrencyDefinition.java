@@ -8,7 +8,8 @@ public record CurrencyDefinition(
         String displayName,
         String symbol,
         BigDecimal startingBalance,
-        boolean notifyOnChange
+        boolean notifyOnChange,
+        boolean realtimeSync
 ) {
     public BigDecimal normalize(BigDecimal amount) {
         return amount.setScale(4, RoundingMode.HALF_UP);

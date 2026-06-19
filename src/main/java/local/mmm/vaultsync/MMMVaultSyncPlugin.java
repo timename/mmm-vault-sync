@@ -344,7 +344,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public Map<String, CurrencyDefinition> getCurrencies() {
         if (config == null) {
-            return Map.of(DEFAULT_CURRENCY_ID, new CurrencyDefinition(DEFAULT_CURRENCY_ID, "默认货币", "", BigDecimal.ZERO, true));
+            return Map.of(DEFAULT_CURRENCY_ID, new CurrencyDefinition(DEFAULT_CURRENCY_ID, "默认货币", "", BigDecimal.ZERO, true, true));
         }
         return config.currencies();
     }
@@ -891,7 +891,8 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 getConfig().getString("default-currency.display-name", "金币"),
                 getConfig().getString("default-currency.symbol", ""),
                 normalizeAmount(BigDecimal.ZERO),
-                getConfig().getBoolean("default-currency.notify-on-change", true)
+                getConfig().getBoolean("default-currency.notify-on-change", true),
+                getConfig().getBoolean("default-currency.realtime-sync", true)
         );
 
         Map<String, CurrencyDefinition> currencies = new LinkedHashMap<>();
@@ -913,7 +914,8 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                         section.getString("display-name", normalizedId),
                         section.getString("symbol", ""),
                         normalizeAmount(BigDecimal.valueOf(section.getDouble("starting-balance", 0.0D))),
-                        section.getBoolean("notify-on-change", true)
+                        section.getBoolean("notify-on-change", true),
+                        section.getBoolean("realtime-sync", true)
                 ));
             }
         }
@@ -1203,6 +1205,11 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
     private void publishRedisBalanceChange(UUID playerId, String currencyId, long revision) {
         if (redisSyncManager == null || !redisSyncManager.isEnabled()) {
+            return;
+        }
+        CurrencyDefinition currency = getCurrencies().get(currencyId);
+        if (currency != null && !currency.realtimeSync()) {
+            debug("货币未开启 Redis 实时同步，跳过发布: currency=" + currencyId + ", uuid=" + playerId);
             return;
         }
         redisSyncManager.publishBalanceChange(playerId, currencyId, revision, config.serverId());
