@@ -2,9 +2,17 @@
 
 ## Version
 
-当前版本：`3.5.0`
+当前版本：`3.6.0`
 
 ## 更新内容
+
+### 3.6.0
+
+- 新增玩家默认货币提醒设置命令 `/mmmvaultsync notify`。
+- 默认货币允许玩家独立设置总开关、增加提醒、减少提醒和最低提醒金额，默认最低提醒金额为 `1000`。
+- 自管货币提醒由服主配置控制，玩家不能关闭；自管货币默认只要有变动就提醒。
+- `/mmmvaultsync changes` 改为分页查询，普通玩家只能查询自己，管理员可查询指定玩家。
+- TAB 补全按权限过滤，普通玩家不会看到无权执行的管理命令。
 
 ### 3.5.0
 
@@ -116,7 +124,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.5.0.jar](target/mmm-vault-sync-3.5.0.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.6.0.jar](target/mmm-vault-sync-3.6.0.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -169,6 +177,23 @@ MMMVaultSync 现在分成两部分能力：
 - 默认货币实际余额仍来自 Vault 后端
 - `display-name` 和 `symbol` 主要用于插件消息提示
 - 默认货币 ID 固定为 `default`
+- 默认货币允许玩家通过 `/mmmvaultsync notify` 控制自己的提醒偏好
+- 默认货币玩家提醒默认最低金额为 `1000`
+
+示例：
+
+```yml
+default-currency:
+  display-name: 金币
+  symbol: ""
+  notify-on-change: true
+  realtime-sync: true
+  player-notification:
+    default-enabled: true
+    default-notify-increase: true
+    default-notify-decrease: true
+    default-min-amount: 1000
+```
 
 ### 自管货币
 
@@ -181,6 +206,10 @@ currencies:
     symbol: "◇"
     starting-balance: 0
     notify-on-change: true
+    notify-increase: true
+    notify-decrease: true
+    notify-min-amount: 0
+    realtime-sync: true
 ```
 
 说明：
@@ -189,6 +218,8 @@ currencies:
 - 货币 ID 建议只使用小写英文、数字、下划线
 - 不要与 `default` 冲突
 - 这些货币完全由 MMMVaultSync 自己管理
+- 自管货币提醒由配置控制，玩家不能关闭
+- `notify-min-amount: 0` 表示只要有变动就提醒
 
 ## 数据库说明
 
@@ -290,16 +321,38 @@ mmmvaultsync.admin
 ### 余额变动记录
 
 ```text
-/mmmvaultsync changes [数量]
-/mmmvaultsync changes <玩家> [数量]
+/mmmvaultsync changes [页码]
+/mmmvaultsync changes <玩家> [页码]
 ```
 
 说明：
 
-- 普通玩家可以查看自己的最近余额变动
+- 普通玩家只能查看自己的最近余额变动
 - 管理员可以查看指定玩家的最近余额变动
+- 查询结果按页显示，页大小和最大可查询记录数由 `changes.page-size`、`changes.max-query-records` 控制
 - 玩家上线时，如果离线期间有未读余额变动，会收到一条可点击摘要
 - 玩家点击摘要或执行 `/mmmvaultsync changes` 后，会把显示到的未读记录标记为已读
+
+### 默认货币提醒设置
+
+```text
+/mmmvaultsync notify
+/mmmvaultsync notify status
+/mmmvaultsync notify on
+/mmmvaultsync notify off
+/mmmvaultsync notify increase on
+/mmmvaultsync notify increase off
+/mmmvaultsync notify decrease on
+/mmmvaultsync notify decrease off
+/mmmvaultsync notify min <金额>
+```
+
+说明：
+
+- 普通玩家可以设置自己的默认货币提醒偏好
+- 默认货币提醒默认开启，默认增加和减少都提醒，默认最低提醒金额为 `1000`
+- 自管货币提醒由服主在配置文件中控制，玩家不能关闭
+- 自管货币默认最低提醒金额为 `0`，即只要有变动就提醒
 
 ### 消息变量
 
@@ -498,7 +551,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.5.0.jar
+target/mmm-vault-sync-3.6.0.jar
 ```
 
 ## 当前建议

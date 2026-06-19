@@ -36,6 +36,9 @@ database:
   # 余额变动历史表名
   # 用于全服只提示一次、离线变动汇总和最近变动查询
   change-table: mmm_vault_sync_balance_changes
+  # 玩家默认货币提醒设置表名
+  # 只保存玩家对 default 默认货币的提醒偏好；自管货币由服主配置控制，玩家不能关闭
+  notification-table: mmm_vault_sync_notification_settings
 
 redis:
   # 是否启用 Redis 实时同步
@@ -62,6 +65,17 @@ default-currency:
   symbol: ""
   # 玩家余额变化时是否发送提示
   notify-on-change: true
+  # 默认货币允许玩家自己控制提醒偏好
+  # 这些值是玩家首次使用提醒设置时的默认值
+  player-notification:
+    # 默认是否启用默认货币变动提醒
+    default-enabled: true
+    # 默认是否提醒默认货币增加
+    default-notify-increase: true
+    # 默认是否提醒默认货币减少
+    default-notify-decrease: true
+    # 默认最低提醒金额；小于该金额的默认货币变动不提醒
+    default-min-amount: 1000
   # 是否通过 Redis 实时同步本货币
   # true: 写入后立即通知其他子服刷新，适合金币等需要实时到账的货币
   # false: 不发送 Redis 事件，只依赖进服/手动同步/周期刷新
@@ -79,6 +93,14 @@ currencies:
     starting-balance: 0
     # 玩家余额变化时是否发送提示
     notify-on-change: true
+    # 自管货币是否提醒增加
+    # 自管货币由服主配置控制，玩家不能关闭
+    notify-increase: true
+    # 自管货币是否提醒减少
+    notify-decrease: true
+    # 自管货币最低提醒金额
+    # 默认 0 表示只要有变动就提醒
+    notify-min-amount: 0
     # 是否通过 Redis 实时同步本货币
     # 需要 redis.enabled: true 才会生效
     realtime-sync: true
@@ -104,6 +126,12 @@ history:
   max-records-per-player-currency: 500
   # 历史清理任务间隔，单位 tick；默认 432000 tick = 6 小时
   cleanup-interval-ticks: 432000
+
+changes:
+  # /mmmvaultsync changes 每页显示多少条记录
+  page-size: 8
+  # 玩家最多能查询最近多少条记录；超过这个范围的旧记录仍保留在数据库，但不会通过命令翻页展示
+  max-query-records: 50
 
 logging:
   # 如需排查同步问题，可临时打开

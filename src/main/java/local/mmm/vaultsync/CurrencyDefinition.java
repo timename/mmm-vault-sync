@@ -9,6 +9,9 @@ public record CurrencyDefinition(
         String symbol,
         BigDecimal startingBalance,
         boolean notifyOnChange,
+        boolean notifyIncrease,
+        boolean notifyDecrease,
+        BigDecimal notifyMinAmount,
         boolean realtimeSync
 ) {
     public BigDecimal normalize(BigDecimal amount) {
@@ -17,6 +20,10 @@ public record CurrencyDefinition(
 
     public BigDecimal normalizedStartingBalance() {
         return normalize(startingBalance);
+    }
+
+    public BigDecimal normalizedNotifyMinAmount() {
+        return normalize(notifyMinAmount == null ? BigDecimal.ZERO : notifyMinAmount);
     }
 
     public String displayLabel() {

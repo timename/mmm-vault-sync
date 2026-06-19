@@ -12,6 +12,7 @@ public record SyncConfig(
         long connectTimeoutMillis,
         String tableName,
         String changeTableName,
+        String notificationTableName,
         long joinLoadDelayTicks,
         long localScanIntervalTicks,
         long remoteRefreshIntervalMillis,
@@ -21,9 +22,12 @@ public record SyncConfig(
         int historyRetentionDays,
         int historyMaxRecordsPerPlayerCurrency,
         long historyCleanupIntervalTicks,
+        int changesPageSize,
+        int changesMaxQueryRecords,
         boolean debugLogging,
         String defaultCurrencyId,
         CurrencyDefinition defaultCurrency,
+        NotificationDefaults defaultNotificationDefaults,
         Map<String, CurrencyDefinition> currencies,
         RedisSyncConfig redisSync
 ) {

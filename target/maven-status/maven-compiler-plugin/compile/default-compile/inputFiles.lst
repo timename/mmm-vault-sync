@@ -8,10 +8,12 @@ E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\BalanceChan
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\SyncPhase.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\VaultSyncCurrencyBalanceChangeEvent.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\Lang.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\NotificationPreference.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\RedisSyncConfig.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\VaultSyncCurrencyService.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\MMMVaultSyncPlugin.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\api\VaultSyncPhaseChangeEvent.java
+E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\NotificationDefaults.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\BalanceStore.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\BalanceRecord.java
 E:\MCserver\git\MMM\mmm-vault-sync\src\main\java\local\mmm\vaultsync\RedisBalanceChangeMessage.java

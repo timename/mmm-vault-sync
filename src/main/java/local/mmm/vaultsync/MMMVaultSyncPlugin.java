@@ -63,11 +63,15 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     public static final String DEFAULT_CURRENCY_ID = "default";
 
     private static final String ADMIN_PERMISSION = "mmmvaultsync.admin";
+    private static final String NOTIFY_PERMISSION = "mmmvaultsync.notify";
     private static final List<String> SUBCOMMANDS = List.of(
-            "help", "reload", "status", "sync", "maintenance", "drain", "verify", "balance", "changes", "currencies"
+            "help", "reload", "status", "sync", "maintenance", "drain", "verify", "balance", "changes", "currencies", "notify"
     );
+    private static final List<String> PLAYER_SUBCOMMANDS = List.of("changes", "notify");
     private static final List<String> BALANCE_QUERY_ACTIONS = List.of("query");
     private static final List<String> BALANCE_MUTATION_ACTIONS = List.of("set", "add", "take");
+    private static final List<String> NOTIFY_ACTIONS = List.of("status", "on", "off", "increase", "decrease", "min");
+    private static final List<String> BOOLEAN_ACTIONS = List.of("on", "off");
     private static final long BALANCE_NOTICE_SUPPRESSION_MILLIS = 30_000L;
     private static final long RELOAD_CONFIRM_WINDOW_MILLIS = 15_000L;
     private static final long DRAIN_WAIT_TIMEOUT_MILLIS = 15_000L;
@@ -78,6 +82,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     private final Map<UUID, PlayerState> states = new ConcurrentHashMap<>();
     private final Map<String, Long> pendingReloadConfirmations = new ConcurrentHashMap<>();
     private final Map<UUID, Map<String, NoticeMark>> recentBalanceNotices = new ConcurrentHashMap<>();
+    private final Map<UUID, NotificationPreference> defaultNotificationPreferences = new ConcurrentHashMap<>();
     private final AtomicInteger activeAsyncOperations = new AtomicInteger();
 
     private Lang lang;
@@ -163,21 +168,30 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         states.clear();
         pendingReloadConfirmations.clear();
         recentBalanceNotices.clear();
+        defaultNotificationPreferences.clear();
         phase = SyncPhase.NORMAL;
     }
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (args.length > 0 && "changes".equalsIgnoreCase(args[0]) && !sender.hasPermission(ADMIN_PERMISSION)) {
-            return handleChangesCommand(sender, args);
-        }
-        if (!sender.hasPermission(ADMIN_PERMISSION)) {
-            sender.sendMessage(lang.warn("command.no-permission", Map.of()));
+        if (args.length == 0) {
+            if (sender.hasPermission(ADMIN_PERMISSION)) {
+                sendHelp(sender);
+            } else {
+                sendPlayerHelp(sender);
+            }
             return true;
         }
 
-        if (args.length == 0) {
-            sendHelp(sender);
+        String subCommand = args[0].toLowerCase(Locale.ROOT);
+        if ("changes".equals(subCommand)) {
+            return handleChangesCommand(sender, args);
+        }
+        if ("notify".equals(subCommand)) {
+            return handleNotifyCommand(sender, args);
+        }
+        if (!sender.hasPermission(ADMIN_PERMISSION)) {
+            sender.sendMessage(lang.warn("command.no-permission", Map.of()));
             return true;
         }
 
@@ -192,7 +206,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             return true;
         }
 
-        return switch (args[0].toLowerCase(Locale.ROOT)) {
+        return switch (subCommand) {
             case "help" -> {
                 sendHelp(sender);
                 yield true;
@@ -212,6 +226,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 sendCurrencies(sender);
                 yield true;
             }
+            case "notify" -> handleNotifyCommand(sender, args);
             default -> {
                 sendHelp(sender);
                 yield true;
@@ -232,18 +247,50 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         sender.sendMessage(lang.info("command.help.balance-query", Map.of()));
         sender.sendMessage(lang.info("command.help.balance-admin", Map.of()));
         sender.sendMessage(lang.info("command.help.changes", Map.of()));
+        sender.sendMessage(lang.info("command.help.notify", Map.of()));
         sender.sendMessage(lang.text("command.group.maintenance", Map.of()));
         sender.sendMessage(lang.info("command.help.maintenance", Map.of()));
     }
 
+    private void sendPlayerHelp(CommandSender sender) {
+        sender.sendMessage(lang.info("command.help-title", Map.of()));
+        sender.sendMessage(lang.info("command.usage.player-help-syntax", Map.of()));
+        sender.sendMessage(lang.info("command.help.changes-player", Map.of()));
+        if (sender.hasPermission(NOTIFY_PERMISSION) || sender.hasPermission(ADMIN_PERMISSION)) {
+            sender.sendMessage(lang.info("command.help.notify-player", Map.of()));
+        }
+    }
+
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (!sender.hasPermission(ADMIN_PERMISSION)) {
+        if (args.length == 1) {
+            return filterByPrefix(availableSubCommands(sender), args[0]);
+        }
+        boolean admin = sender.hasPermission(ADMIN_PERMISSION);
+        if (!canUseSubCommand(sender, args[0])) {
             return Collections.emptyList();
         }
 
-        if (args.length == 1) {
-            return filterByPrefix(SUBCOMMANDS, args[0]);
+        if (args.length == 2 && "notify".equalsIgnoreCase(args[0])) {
+            return filterByPrefix(NOTIFY_ACTIONS, args[1]);
+        }
+        if (args.length == 3 && "notify".equalsIgnoreCase(args[0])
+                && ("increase".equalsIgnoreCase(args[1]) || "decrease".equalsIgnoreCase(args[1]))) {
+            return filterByPrefix(BOOLEAN_ACTIONS, args[2]);
+        }
+        if (args.length == 3 && "notify".equalsIgnoreCase(args[0]) && "min".equalsIgnoreCase(args[1])) {
+            return filterByPrefix(List.of("0", "100", "1000", "10000"), args[2]);
+        }
+
+        if (!admin && "changes".equalsIgnoreCase(args[0])) {
+            if (args.length == 2) {
+                return filterByPrefix(pageSuggestions(), args[1]);
+            }
+            return Collections.emptyList();
+        }
+
+        if (!admin) {
+            return Collections.emptyList();
         }
         if (args.length == 2 && "maintenance".equalsIgnoreCase(args[0])) {
             return filterByPrefix(List.of("on", "off"), args[1]);
@@ -255,10 +302,12 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             return filterByPrefix(listKnownPlayerNames(), args[1]);
         }
         if (args.length == 2 && "changes".equalsIgnoreCase(args[0])) {
-            return filterByPrefix(listKnownPlayerNames(), args[1]);
+            List<String> candidates = new ArrayList<>(pageSuggestions());
+            candidates.addAll(listKnownPlayerNames());
+            return filterByPrefix(candidates, args[1]);
         }
         if (args.length == 3 && "changes".equalsIgnoreCase(args[0])) {
-            return filterByPrefix(List.of("5", "10", "20"), args[2]);
+            return filterByPrefix(pageSuggestions(), args[2]);
         }
         if (args.length == 3 && "balance".equalsIgnoreCase(args[0])) {
             List<String> candidates = new ArrayList<>(BALANCE_QUERY_ACTIONS);
@@ -284,6 +333,37 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         return List.of("1", "10", "100", "1000");
     }
 
+    private List<String> pageSuggestions() {
+        return List.of("1", "2", "3", "4", "5");
+    }
+
+    private List<String> availableSubCommands(CommandSender sender) {
+        if (sender.hasPermission(ADMIN_PERMISSION)) {
+            return SUBCOMMANDS;
+        }
+        List<String> commands = new ArrayList<>();
+        if (sender instanceof Player) {
+            commands.add("changes");
+        }
+        if (sender.hasPermission(NOTIFY_PERMISSION)) {
+            commands.add("notify");
+        }
+        return commands;
+    }
+
+    private boolean canUseSubCommand(CommandSender sender, String subCommand) {
+        if (sender.hasPermission(ADMIN_PERMISSION)) {
+            return true;
+        }
+        if ("changes".equalsIgnoreCase(subCommand)) {
+            return sender instanceof Player;
+        }
+        if ("notify".equalsIgnoreCase(subCommand)) {
+            return sender.hasPermission(NOTIFY_PERMISSION);
+        }
+        return false;
+    }
+
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         if (setupRequired && (event.getPlayer().isOp() || event.getPlayer().hasPermission(ADMIN_PERMISSION))) {
@@ -306,6 +386,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         UUID uuid = event.getPlayer().getUniqueId();
         PlayerState state = states.computeIfAbsent(uuid, ignored -> new PlayerState());
         state.defaultState.lastObservedBalance = getBackendBalance(event.getPlayer());
+        loadDefaultNotificationPreference(uuid);
         if (!maintenanceMode) {
             Bukkit.getScheduler().runTaskLater(this,
                     () -> scheduleAuthoritativeLoad(uuid, "join", null),
@@ -324,6 +405,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         }
         states.remove(uuid);
         recentBalanceNotices.remove(uuid);
+        defaultNotificationPreferences.remove(uuid);
     }
 
     public void afterEconomyMutation(OfflinePlayer player, EconomyResponse response, String reason) {
@@ -344,7 +426,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public Map<String, CurrencyDefinition> getCurrencies() {
         if (config == null) {
-            return Map.of(DEFAULT_CURRENCY_ID, new CurrencyDefinition(DEFAULT_CURRENCY_ID, "默认货币", "", BigDecimal.ZERO, true, true));
+            return Map.of(DEFAULT_CURRENCY_ID, new CurrencyDefinition(DEFAULT_CURRENCY_ID, "默认货币", "", BigDecimal.ZERO, true, true, true, BigDecimal.ZERO, true));
         }
         return config.currencies();
     }
@@ -539,6 +621,83 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
         return true;
     }
 
+    private boolean handleNotifyCommand(CommandSender sender, String[] args) {
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(lang.warn("notify.player-only", Map.of()));
+            return true;
+        }
+        if (!sender.hasPermission(NOTIFY_PERMISSION) && !sender.hasPermission(ADMIN_PERMISSION)) {
+            sender.sendMessage(lang.warn("command.no-permission", Map.of()));
+            return true;
+        }
+        if (store == null || config == null) {
+            sender.sendMessage(lang.warn("setup.mode.active", Map.of()));
+            return true;
+        }
+
+        UUID uuid = player.getUniqueId();
+        NotificationPreference current = defaultNotificationPreference(uuid);
+        String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "status";
+        NotificationPreference updated;
+        switch (action) {
+            case "status" -> {
+                sendNotifyStatus(player, current);
+                return true;
+            }
+            case "on" -> updated = new NotificationPreference(uuid, config.defaultCurrencyId(), true,
+                    current.notifyIncrease(), current.notifyDecrease(), current.normalizedMinAmount());
+            case "off" -> updated = new NotificationPreference(uuid, config.defaultCurrencyId(), false,
+                    current.notifyIncrease(), current.notifyDecrease(), current.normalizedMinAmount());
+            case "increase" -> {
+                if (args.length < 3 || !isBooleanAction(args[2])) {
+                    sender.sendMessage(lang.info("command.usage.notify", Map.of()));
+                    return true;
+                }
+                updated = new NotificationPreference(uuid, config.defaultCurrencyId(), current.enabled(),
+                        "on".equalsIgnoreCase(args[2]), current.notifyDecrease(), current.normalizedMinAmount());
+            }
+            case "decrease" -> {
+                if (args.length < 3 || !isBooleanAction(args[2])) {
+                    sender.sendMessage(lang.info("command.usage.notify", Map.of()));
+                    return true;
+                }
+                updated = new NotificationPreference(uuid, config.defaultCurrencyId(), current.enabled(),
+                        current.notifyIncrease(), "on".equalsIgnoreCase(args[2]), current.normalizedMinAmount());
+            }
+            case "min" -> {
+                if (args.length < 3) {
+                    sender.sendMessage(lang.info("command.usage.notify", Map.of()));
+                    return true;
+                }
+                BigDecimal amount = parseAmount(args[2]);
+                if (amount == null || amount.signum() < 0) {
+                    sender.sendMessage(lang.warn("balance.invalid-amount", Map.of()));
+                    return true;
+                }
+                updated = new NotificationPreference(uuid, config.defaultCurrencyId(), current.enabled(),
+                        current.notifyIncrease(), current.notifyDecrease(), normalizeAmount(amount));
+            }
+            default -> {
+                sender.sendMessage(lang.info("command.usage.notify", Map.of()));
+                return true;
+            }
+        }
+
+        NotificationPreference finalUpdated = updated;
+        runAsync(() -> store.saveNotificationPreference(finalUpdated))
+                .whenComplete((saved, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+                    if (throwable != null) {
+                        sender.sendMessage(lang.warn("notify.save-failed", Map.of()));
+                        log(Level.WARNING, "保存提醒设置失败: " + uuid, throwable);
+                        return;
+                    }
+                    defaultNotificationPreferences.put(uuid, saved);
+                    sender.sendMessage(lang.ok("notify.saved", Map.of()));
+                    sendNotifyStatus(player, saved);
+                }));
+        return true;
+    }
+
     private boolean handleChangesCommand(CommandSender sender, String[] args) {
         if (store == null) {
             sender.sendMessage(lang.warn("setup.mode.active", Map.of()));
@@ -547,7 +706,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
         boolean admin = sender.hasPermission(ADMIN_PERMISSION);
         OfflinePlayer target;
-        int limitArgumentIndex;
+        int pageArgumentIndex;
         boolean markRead;
         if (admin && args.length >= 2 && !isInteger(args[1])) {
             target = resolveOfflinePlayer(args[1]);
@@ -555,7 +714,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 sender.sendMessage(lang.warn("command.player-not-found", Map.of("player", args[1])));
                 return true;
             }
-            limitArgumentIndex = 2;
+            pageArgumentIndex = 2;
             markRead = false;
         } else {
             if (!(sender instanceof Player player)) {
@@ -563,33 +722,41 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 return true;
             }
             target = player;
-            limitArgumentIndex = 1;
+            pageArgumentIndex = 1;
             markRead = true;
         }
 
-        int limit = 10;
-        if (args.length > limitArgumentIndex) {
-            Integer parsedLimit = parsePositiveInt(args[limitArgumentIndex]);
-            if (parsedLimit == null) {
+        int page = 1;
+        if (args.length > pageArgumentIndex) {
+            Integer parsedPage = parsePositiveInt(args[pageArgumentIndex]);
+            if (parsedPage == null) {
                 sender.sendMessage(lang.info(admin ? "command.usage.changes-admin" : "command.usage.changes", Map.of()));
                 return true;
             }
-            limit = Math.min(50, parsedLimit);
+            page = parsedPage;
         }
 
         OfflinePlayer finalTarget = target;
-        int finalLimit = limit;
+        int pageSize = config.changesPageSize();
+        int maxRecords = config.changesMaxQueryRecords();
+        int maxPage = Math.max(1, (int) Math.ceil(maxRecords / (double) pageSize));
+        int finalPage = Math.min(page, maxPage);
+        int offset = (finalPage - 1) * pageSize;
         boolean finalMarkRead = markRead;
-        runAsync(() -> store.loadRecentChanges(finalTarget.getUniqueId(), finalLimit))
-                .whenComplete((changes, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+        boolean finalAdminView = admin && !markRead;
+        CompletableFuture<Integer> countFuture = runAsync(() -> store.countRecentChanges(finalTarget.getUniqueId(), maxRecords));
+        CompletableFuture<List<BalanceChangeRecord>> changesFuture = runAsync(() ->
+                store.loadRecentChangesPage(finalTarget.getUniqueId(), offset, pageSize, maxRecords));
+        countFuture.thenCombine(changesFuture, ChangesPageResult::new)
+                .whenComplete((result, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
                     if (throwable != null) {
                         sender.sendMessage(lang.warn("changes.query-failed", Map.of("player", displayPlayer(finalTarget))));
                         log(Level.WARNING, "查询余额变动记录失败: " + finalTarget.getUniqueId(), throwable);
                         return;
                     }
-                    sendChangeList(sender, finalTarget, changes);
-                    if (finalMarkRead && changes != null && !changes.isEmpty()) {
-                        List<Long> ids = changes.stream()
+                    sendChangeList(sender, finalTarget, result.changes(), finalPage, pageSize, maxRecords, result.total(), finalAdminView);
+                    if (finalMarkRead && result.changes() != null && !result.changes().isEmpty()) {
+                        List<Long> ids = result.changes().stream()
                                 .filter(change -> change.readAtMillis() == null)
                                 .map(BalanceChangeRecord::id)
                                 .toList();
@@ -651,6 +818,44 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
 
     private boolean isBalanceMutationAction(String action) {
         return "set".equalsIgnoreCase(action) || "add".equalsIgnoreCase(action) || "take".equalsIgnoreCase(action);
+    }
+
+    private boolean isBooleanAction(String action) {
+        return "on".equalsIgnoreCase(action) || "off".equalsIgnoreCase(action);
+    }
+
+    private NotificationPreference defaultNotificationPreference(UUID uuid) {
+        return defaultNotificationPreferences.computeIfAbsent(uuid, id -> new NotificationPreference(
+                id,
+                config.defaultCurrencyId(),
+                config.defaultNotificationDefaults().enabled(),
+                config.defaultNotificationDefaults().notifyIncrease(),
+                config.defaultNotificationDefaults().notifyDecrease(),
+                config.defaultNotificationDefaults().normalizedMinAmount()
+        ));
+    }
+
+    private void loadDefaultNotificationPreference(UUID uuid) {
+        if (store == null || config == null) {
+            return;
+        }
+        runAsync(() -> store.loadNotificationPreference(uuid, config.defaultCurrencyId()))
+                .whenComplete((preference, throwable) -> Bukkit.getScheduler().runTask(this, () -> {
+                    if (throwable != null) {
+                        log(Level.WARNING, "加载提醒设置失败: " + uuid, throwable);
+                        return;
+                    }
+                    defaultNotificationPreferences.put(uuid, preference);
+                }));
+    }
+
+    private void sendNotifyStatus(CommandSender sender, NotificationPreference preference) {
+        sender.sendMessage(lang.info("notify.status", Map.of(
+                "enabled", yesNo(preference.enabled()),
+                "increase", yesNo(preference.notifyIncrease()),
+                "decrease", yesNo(preference.notifyDecrease()),
+                "min", formatAmount(config.defaultCurrency(), preference.normalizedMinAmount())
+        )));
     }
 
     private boolean handleReloadCommand(CommandSender sender, String[] args) {
@@ -892,7 +1097,16 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 getConfig().getString("default-currency.symbol", ""),
                 normalizeAmount(BigDecimal.ZERO),
                 getConfig().getBoolean("default-currency.notify-on-change", true),
+                true,
+                true,
+                BigDecimal.ZERO,
                 getConfig().getBoolean("default-currency.realtime-sync", true)
+        );
+        NotificationDefaults defaultNotificationDefaults = new NotificationDefaults(
+                getConfig().getBoolean("default-currency.player-notification.default-enabled", true),
+                getConfig().getBoolean("default-currency.player-notification.default-notify-increase", true),
+                getConfig().getBoolean("default-currency.player-notification.default-notify-decrease", true),
+                normalizeAmount(BigDecimal.valueOf(getConfig().getDouble("default-currency.player-notification.default-min-amount", 1000.0D)))
         );
 
         Map<String, CurrencyDefinition> currencies = new LinkedHashMap<>();
@@ -915,6 +1129,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                         section.getString("symbol", ""),
                         normalizeAmount(BigDecimal.valueOf(section.getDouble("starting-balance", 0.0D))),
                         section.getBoolean("notify-on-change", true),
+                        section.getBoolean("notify-increase", true),
+                        section.getBoolean("notify-decrease", true),
+                        normalizeAmount(BigDecimal.valueOf(section.getDouble("notify-min-amount", 0.0D))),
                         section.getBoolean("realtime-sync", true)
                 ));
             }
@@ -930,6 +1147,7 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 Math.max(1000L, getConfig().getLong("database.connect-timeout-millis", 5000L)),
                 getConfig().getString("database.table", "mmm_vault_sync_balances"),
                 getConfig().getString("database.change-table", "mmm_vault_sync_balance_changes"),
+                getConfig().getString("database.notification-table", "mmm_vault_sync_notification_settings"),
                 Math.max(1L, getConfig().getLong("sync.join-load-delay-ticks", 10L)),
                 Math.max(1L, getConfig().getLong("sync.local-scan-interval-ticks", 20L)),
                 Math.max(1000L, getConfig().getLong("sync.remote-refresh-interval-seconds", 15L) * 1000L),
@@ -939,9 +1157,12 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 Math.max(0, getConfig().getInt("history.retention-days", 30)),
                 Math.max(0, getConfig().getInt("history.max-records-per-player-currency", 500)),
                 Math.max(1200L, getConfig().getLong("history.cleanup-interval-ticks", 432000L)),
+                Math.max(1, getConfig().getInt("changes.page-size", 8)),
+                Math.max(1, getConfig().getInt("changes.max-query-records", 50)),
                 getConfig().getBoolean("logging.debug", false),
                 DEFAULT_CURRENCY_ID,
                 defaultCurrency,
+                defaultNotificationDefaults,
                 Collections.unmodifiableMap(currencies),
                 loadRedisConfig()
         );
@@ -1804,14 +2025,35 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                 }));
     }
 
-    private void sendChangeList(CommandSender sender, OfflinePlayer target, List<BalanceChangeRecord> changes) {
+    private void sendChangeList(
+            CommandSender sender,
+            OfflinePlayer target,
+            List<BalanceChangeRecord> changes,
+            int page,
+            int pageSize,
+            int maxRecords,
+            int total,
+            boolean adminView
+    ) {
+        int totalPages = Math.max(1, (int) Math.ceil(Math.max(0, total) / (double) Math.max(1, pageSize)));
+        int boundedPage = Math.min(Math.max(1, page), totalPages);
         if (changes == null || changes.isEmpty()) {
             sender.sendMessage(lang.info("changes.empty", Map.of("player", displayPlayer(target))));
+            sender.sendMessage(lang.info("changes.page-help", Map.of(
+                    "page", String.valueOf(boundedPage),
+                    "pages", String.valueOf(totalPages),
+                    "pageSize", String.valueOf(pageSize),
+                    "max", String.valueOf(maxRecords)
+            )));
             return;
         }
         sender.sendMessage(lang.info("changes.title", Map.of(
-                "player", displayPlayer(target),
-                "count", String.valueOf(changes.size())
+            "player", displayPlayer(target),
+                "page", String.valueOf(boundedPage),
+                "pages", String.valueOf(totalPages),
+                "pageSize", String.valueOf(pageSize),
+                "max", String.valueOf(maxRecords),
+                "total", String.valueOf(total)
         )));
         for (BalanceChangeRecord change : changes) {
             sender.sendMessage(lang.text("changes.entry", Map.of(
@@ -1822,6 +2064,47 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                     "reason", displayReason(change.reason())
             )));
         }
+        sender.sendMessage(lang.info("changes.page-help", Map.of(
+                "page", String.valueOf(boundedPage),
+                "pages", String.valueOf(totalPages),
+                "pageSize", String.valueOf(pageSize),
+                "max", String.valueOf(maxRecords)
+        )));
+        sendChangePageNavigation(sender, target, boundedPage, totalPages, adminView);
+    }
+
+    private void sendChangePageNavigation(CommandSender sender, OfflinePlayer target, int page, int totalPages, boolean adminView) {
+        if (!(sender instanceof Player player) || totalPages <= 1) {
+            return;
+        }
+        List<TextComponent> components = new ArrayList<>();
+        if (page > 1) {
+            components.add(changePageComponent(lang.text("changes.prev-page", Map.of()), changePageCommand(target, page - 1, adminView)));
+        }
+        if (page < totalPages) {
+            if (!components.isEmpty()) {
+                components.add(new TextComponent(" "));
+            }
+            components.add(changePageComponent(lang.text("changes.next-page", Map.of()), changePageCommand(target, page + 1, adminView)));
+        }
+        if (!components.isEmpty()) {
+            player.spigot().sendMessage(components.toArray(new TextComponent[0]));
+        }
+    }
+
+    private TextComponent changePageComponent(String text, String command) {
+        TextComponent component = new TextComponent(text);
+        component.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, command));
+        component.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                new ComponentBuilder(lang.text("changes.click-page", Map.of("command", command))).create()));
+        return component;
+    }
+
+    private String changePageCommand(OfflinePlayer target, int page, boolean adminView) {
+        if (adminView) {
+            return "/mmmvaultsync changes " + displayPlayer(target) + " " + page;
+        }
+        return "/mmmvaultsync changes " + page;
     }
 
     private void notifyBalanceChangeIfNeeded(OfflinePlayer player, CurrencyDefinition currency, BigDecimal delta, BigDecimal balance, String reason, long revision) {
@@ -1832,6 +2115,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
             return;
         }
         if (!currency.notifyOnChange() || delta == null || delta.signum() == 0) {
+            return;
+        }
+        if (!shouldNotifyByPreference(player.getUniqueId(), currency, delta)) {
             return;
         }
         Player onlinePlayer = resolveOnlinePlayer(player);
@@ -1856,6 +2142,31 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
                         notifyBalanceChange(onlinePlayer, currency, delta, balance, reason);
                     }
                 }));
+    }
+
+    private boolean shouldNotifyByPreference(UUID playerId, CurrencyDefinition currency, BigDecimal delta) {
+        BigDecimal absoluteDelta = delta.abs();
+        if (config != null && config.defaultCurrencyId().equals(currency.id())) {
+            NotificationPreference preference = defaultNotificationPreference(playerId);
+            if (!preference.enabled()) {
+                return false;
+            }
+            if (delta.signum() > 0 && !preference.notifyIncrease()) {
+                return false;
+            }
+            if (delta.signum() < 0 && !preference.notifyDecrease()) {
+                return false;
+            }
+            return absoluteDelta.compareTo(preference.normalizedMinAmount()) >= 0;
+        }
+
+        if (delta.signum() > 0 && !currency.notifyIncrease()) {
+            return false;
+        }
+        if (delta.signum() < 0 && !currency.notifyDecrease()) {
+            return false;
+        }
+        return absoluteDelta.compareTo(currency.normalizedNotifyMinAmount()) >= 0;
     }
 
     private boolean shouldSuppressBalanceNotice(UUID playerId, String currencyId, BigDecimal delta, BigDecimal balance) {
@@ -2193,6 +2504,9 @@ public final class MMMVaultSyncPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private record NoticeMark(BigDecimal delta, BigDecimal balance, long notifiedAtMillis) {
+    }
+
+    private record ChangesPageResult(int total, List<BalanceChangeRecord> changes) {
     }
 
     private static final class SyncThreadFactory implements ThreadFactory {

@@ -20,12 +20,16 @@ public final class BalanceStore implements AutoCloseable {
     private final HikariDataSource dataSource;
     private final String tableName;
     private final String changeTableName;
+    private final String notificationTableName;
     private final String defaultCurrencyId;
+    private final NotificationDefaults notificationDefaults;
 
     public BalanceStore(SyncConfig config) {
         this.tableName = config.tableName();
         this.changeTableName = config.changeTableName();
+        this.notificationTableName = config.notificationTableName();
         this.defaultCurrencyId = config.defaultCurrencyId();
+        this.notificationDefaults = config.defaultNotificationDefaults();
 
         HikariConfig hikariConfig = new HikariConfig();
         hikariConfig.setJdbcUrl(config.jdbcUrl());
@@ -58,6 +62,7 @@ public final class BalanceStore implements AutoCloseable {
             }
             createChangeTable(connection);
             ensureChangeTableIndexes(connection);
+            createNotificationTable(connection);
             connection.commit();
         }
     }
@@ -226,6 +231,107 @@ public final class BalanceStore implements AutoCloseable {
         }
     }
 
+    public int countRecentChanges(UUID uuid, int maxRecords) throws SQLException {
+        String sql = "SELECT COUNT(*) FROM ("
+                + "SELECT id FROM `" + changeTableName + "` "
+                + "WHERE uuid = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+                + ") recent_changes";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, uuid.toString());
+            statement.setInt(2, Math.max(1, maxRecords));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                int count = resultSet.next() ? resultSet.getInt(1) : 0;
+                connection.commit();
+                return count;
+            }
+        }
+    }
+
+    public List<BalanceChangeRecord> loadRecentChangesPage(UUID uuid, int offset, int limit, int maxRecords) throws SQLException {
+        int boundedOffset = Math.max(0, offset);
+        int boundedLimit = Math.max(1, limit);
+        int boundedMaxRecords = Math.max(boundedLimit, maxRecords);
+        String sql = "SELECT id, uuid, currency_id, revision, previous_balance, new_balance, delta, reason, "
+                + "source_server, created_at, notified_at, notified_server, read_at "
+                + "FROM ("
+                + "SELECT id, uuid, currency_id, revision, previous_balance, new_balance, delta, reason, "
+                + "source_server, created_at, notified_at, notified_server, read_at "
+                + "FROM `" + changeTableName + "` "
+                + "WHERE uuid = ? "
+                + "ORDER BY created_at DESC, id DESC LIMIT ?"
+                + ") recent_changes "
+                + "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, uuid.toString());
+            statement.setInt(2, boundedMaxRecords);
+            statement.setInt(3, boundedLimit);
+            statement.setInt(4, boundedOffset);
+            List<BalanceChangeRecord> changes = new java.util.ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    changes.add(readChangeRecord(resultSet));
+                }
+            }
+            connection.commit();
+            return changes;
+        }
+    }
+
+    public NotificationPreference loadNotificationPreference(UUID uuid, String currencyId) throws SQLException {
+        String sql = "SELECT uuid, currency_id, enabled, notify_increase, notify_decrease, min_amount "
+                + "FROM `" + notificationTableName + "` WHERE uuid = ? AND currency_id = ?";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, uuid.toString());
+            statement.setString(2, currencyId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    NotificationPreference preference = defaultNotificationPreference(uuid, currencyId);
+                    connection.commit();
+                    return preference;
+                }
+                NotificationPreference preference = readNotificationPreference(resultSet);
+                connection.commit();
+                return preference;
+            }
+        }
+    }
+
+    public NotificationPreference saveNotificationPreference(NotificationPreference preference) throws SQLException {
+        String sql = "INSERT INTO `" + notificationTableName + "` "
+                + "(uuid, currency_id, enabled, notify_increase, notify_decrease, min_amount, updated_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE "
+                + "enabled = VALUES(enabled), "
+                + "notify_increase = VALUES(notify_increase), "
+                + "notify_decrease = VALUES(notify_decrease), "
+                + "min_amount = VALUES(min_amount), "
+                + "updated_at = VALUES(updated_at)";
+        NotificationPreference normalized = new NotificationPreference(
+                preference.uuid(),
+                preference.currencyId(),
+                preference.enabled(),
+                preference.notifyIncrease(),
+                preference.notifyDecrease(),
+                preference.normalizedMinAmount()
+        );
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, normalized.uuid().toString());
+            statement.setString(2, normalized.currencyId());
+            statement.setBoolean(3, normalized.enabled());
+            statement.setBoolean(4, normalized.notifyIncrease());
+            statement.setBoolean(5, normalized.notifyDecrease());
+            statement.setBigDecimal(6, normalized.normalizedMinAmount());
+            statement.setLong(7, System.currentTimeMillis());
+            statement.executeUpdate();
+            connection.commit();
+            return normalized;
+        }
+    }
+
     public int markChangesRead(UUID uuid, List<Long> ids, long now) throws SQLException {
         if (ids == null || ids.isEmpty()) {
             return 0;
@@ -316,6 +422,22 @@ public final class BalanceStore implements AutoCloseable {
                 + "KEY `idx_balance_change_unread` (`uuid`, `read_at`, `created_at`),"
                 + "KEY `idx_balance_change_recent` (`uuid`, `created_at`),"
                 + "KEY `idx_balance_change_cleanup` (`uuid`, `currency_id`, `created_at`, `id`)"
+                + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+        try (Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+    private void createNotificationTable(Connection connection) throws SQLException {
+        String sql = "CREATE TABLE IF NOT EXISTS `" + notificationTableName + "` ("
+                + "`uuid` CHAR(36) NOT NULL,"
+                + "`currency_id` VARCHAR(64) NOT NULL,"
+                + "`enabled` BOOLEAN NOT NULL,"
+                + "`notify_increase` BOOLEAN NOT NULL,"
+                + "`notify_decrease` BOOLEAN NOT NULL,"
+                + "`min_amount` DECIMAL(19,4) NOT NULL,"
+                + "`updated_at` BIGINT NOT NULL,"
+                + "PRIMARY KEY (`uuid`, `currency_id`)"
                 + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
         try (Statement statement = connection.createStatement()) {
             statement.execute(sql);
@@ -429,6 +551,28 @@ public final class BalanceStore implements AutoCloseable {
                 nullableNotifiedAt,
                 resultSet.getString("notified_server"),
                 nullableReadAt
+        );
+    }
+
+    private NotificationPreference readNotificationPreference(ResultSet resultSet) throws SQLException {
+        return new NotificationPreference(
+                UUID.fromString(resultSet.getString("uuid")),
+                resultSet.getString("currency_id"),
+                resultSet.getBoolean("enabled"),
+                resultSet.getBoolean("notify_increase"),
+                resultSet.getBoolean("notify_decrease"),
+                resultSet.getBigDecimal("min_amount")
+        );
+    }
+
+    private NotificationPreference defaultNotificationPreference(UUID uuid, String currencyId) {
+        return new NotificationPreference(
+                uuid,
+                currencyId,
+                notificationDefaults.enabled(),
+                notificationDefaults.notifyIncrease(),
+                notificationDefaults.notifyDecrease(),
+                notificationDefaults.normalizedMinAmount()
         );
     }
 
