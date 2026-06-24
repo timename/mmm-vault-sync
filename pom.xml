@@ -5,7 +5,7 @@
 
     <groupId>local.mmm</groupId>
     <artifactId>mmm-vault-sync</artifactId>
-    <version>3.6.0</version>
+    <version>3.6.3</version>
     <packaging>jar</packaging>
 
     <name>MMMVaultSync</name>

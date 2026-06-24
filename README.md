@@ -2,9 +2,31 @@
 
 ## Version
 
-当前版本：`3.6.0`
+当前版本：`3.6.3`
 
 ## 更新内容
+
+### 3.6.3
+
+- 补充 `VaultSyncCurrencyService` API 使用约束：余额修改方法返回的 `CompletableFuture` 可能需要回到 Bukkit 主线程应用本地状态后才完成。
+- 外部插件不得在 Bukkit 主线程使用 `get()` / `join()` 阻塞等待余额修改结果；应使用回调，并在回调中按需切回主线程执行 Bukkit API。
+- 说明该约束可避免调用方阻塞主线程后，MMMVaultSync 的主线程应用任务无法执行，导致调用方误判扣款失败但实际随后扣款成功。
+### 3.6.2
+
+- 将 `萌萌币` 调整为默认货币显示名，不再作为 `currencies` 下的自管货币。
+- 自管货币模板保留三种：
+  - `mengmeng_shell`：萌萌贝壳，稀有抽奖
+  - `dream_meteor`：梦幻流星，时装家具
+  - `mengmeng_gem`：萌萌宝石，赞助货币
+
+### 3.6.1
+
+- 默认货币和自管货币模板调整为本服货币：
+  - `default`：萌萌币，日常交易
+  - `mengmeng_shell`：萌萌贝壳，稀有抽奖
+  - `dream_meteor`：梦幻流星，时装家具
+  - `mengmeng_gem`：萌萌宝石，赞助货币
+- README 同步新的自管货币 ID 和示例。
 
 ### 3.6.0
 
@@ -124,7 +146,7 @@ MMMVaultSync 现在分成两部分能力：
 
 ## 安装步骤
 
-1. 将 [target/mmm-vault-sync-3.6.0.jar](target/mmm-vault-sync-3.6.0.jar) 放入每个子服的 `plugins` 目录。
+1. 将 [target/mmm-vault-sync-3.6.3.jar](target/mmm-vault-sync-3.6.3.jar) 放入每个子服的 `plugins` 目录。
 2. 每个子服先启动一次，让插件自动生成配置文件。
 3. 编辑每个子服的 `plugins/MMMVaultSync/config.yml`。
 4. 为每个子服填写不同的 `server-id`。
@@ -201,9 +223,29 @@ default-currency:
 
 ```yml
 currencies:
-  gems:
-    display-name: 宝石
-    symbol: "◇"
+  mengmeng_shell:
+    display-name: 萌萌贝壳
+    symbol: "❖"
+    starting-balance: 0
+    notify-on-change: true
+    notify-increase: true
+    notify-decrease: true
+    notify-min-amount: 0
+    realtime-sync: true
+
+  dream_meteor:
+    display-name: 梦幻流星
+    symbol: "✦"
+    starting-balance: 0
+    notify-on-change: true
+    notify-increase: true
+    notify-decrease: true
+    notify-min-amount: 0
+    realtime-sync: true
+
+  mengmeng_gem:
+    display-name: 萌萌宝石
+    symbol: "✧"
     starting-balance: 0
     notify-on-change: true
     notify-increase: true
@@ -214,7 +256,7 @@ currencies:
 
 说明：
 
-- `gems` 是货币 ID
+- `mengmeng_shell`、`dream_meteor`、`mengmeng_gem` 是自管货币 ID
 - 货币 ID 建议只使用小写英文、数字、下划线
 - 不要与 `default` 冲突
 - 这些货币完全由 MMMVaultSync 自己管理
@@ -279,7 +321,7 @@ default-currency:
   realtime-sync: true
 
 currencies:
-  gems:
+  mengmeng_shell:
     realtime-sync: true
 ```
 
@@ -402,11 +444,11 @@ mmmvaultsync.admin
 | --- | --- | --- |
 | `%mmmvaultsync_balance%` | 当前玩家的默认货币余额，等同于 `default` 货币 | `1234.5` |
 | `%mmmvaultsync_balance_default%` | 当前玩家的默认货币余额 | `1234.5` |
-| `%mmmvaultsync_balance_<货币ID>%` | 当前玩家指定货币的余额，把 `<货币ID>` 换成实际 ID | `%mmmvaultsync_balance_gems%` |
-| `%mmmvaultsync_currency_name_<货币ID>%` | 指定货币的显示名称 | `%mmmvaultsync_currency_name_gems%` -> `宝石` |
-| `%mmmvaultsync_currency_symbol_<货币ID>%` | 指定货币的符号 | `%mmmvaultsync_currency_symbol_gems%` -> `◆` |
+| `%mmmvaultsync_balance_<货币ID>%` | 当前玩家指定货币的余额，把 `<货币ID>` 换成实际 ID | `%mmmvaultsync_balance_mengmeng_shell%` |
+| `%mmmvaultsync_currency_name_<货币ID>%` | 指定货币的显示名称 | `%mmmvaultsync_currency_name_mengmeng_shell%` -> `萌萌贝壳` |
+| `%mmmvaultsync_currency_symbol_<货币ID>%` | 指定货币的符号 | `%mmmvaultsync_currency_symbol_mengmeng_shell%` -> `❖` |
 | `%mmmvaultsync_default_currency%` | 默认货币 ID | `default` |
-| `%mmmvaultsync_currency_count%` | 当前已加载的货币数量，包含默认货币 | `2` |
+| `%mmmvaultsync_currency_count%` | 当前已加载的货币数量，包含默认货币 | `4` |
 | `%mmmvaultsync_phase%` | 插件当前同步阶段 | `NORMAL` |
 | `%mmmvaultsync_maintenance%` | 是否处于维护模式 | `true` / `false` |
 | `%mmmvaultsync_drain%` | 当前 drain 是否完成 | `true` / `false` |
@@ -415,7 +457,7 @@ mmmvaultsync.admin
 说明：
 
 - `%mmmvaultsync_balance%` 等同于 `%mmmvaultsync_balance_default%`
-- `%mmmvaultsync_balance_<货币ID>%` 显示指定货币余额，例如 `%mmmvaultsync_balance_gems%`
+- `%mmmvaultsync_balance_<货币ID>%` 显示指定货币余额，例如 `%mmmvaultsync_balance_mengmeng_shell%`
 - PAPI 读取的是插件当前缓存/在线快照，不会为了显示变量阻塞等待数据库查询
 - 其他插件要修改余额时，必须使用 `VaultSyncCurrencyService` API
 
@@ -551,7 +593,7 @@ mvn package
 编译产物：
 
 ```text
-target/mmm-vault-sync-3.6.0.jar
+target/mmm-vault-sync-3.6.3.jar
 ```
 
 ## 当前建议

@@ -8,6 +8,14 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * Public multi-currency API.
+ *
+ * <p>Mutation futures may complete after MMMVaultSync writes storage and applies local state on
+ * the Bukkit main thread. Callers must not block the Bukkit main thread with {@code get()} or
+ * {@code join()}; use callbacks and return to the main thread from the callback when Bukkit API
+ * work is required. Do not block the Bukkit main thread while waiting for these futures.</p>
+ */
 public interface VaultSyncCurrencyService extends VaultSyncStateService {
     String getDefaultCurrencyId();
 

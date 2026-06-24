@@ -61,7 +61,7 @@ redis:
 # 默认货币 = Vault / CMI 主货币
 default-currency:
   # 仅用于提示显示，不会替换 Vault 后端自身格式化规则
-  display-name: 金币
+  display-name: 萌萌币
   symbol: ""
   # 玩家余额变化时是否发送提示
   notify-on-change: true
@@ -87,22 +87,37 @@ default-currency:
 # 2. 未来交易插件、菜单插件、任务插件应调用 MMMVaultSync API 操作这些货币
 # 3. 货币 id 只能用小写英文、数字、下划线，不能与 default 冲突
 currencies:
-  gems:
-    display-name: 宝石
-    symbol: "◇"
+  mengmeng_shell:
+    display-name: 萌萌贝壳
+    symbol: "❖"
     starting-balance: 0
-    # 玩家余额变化时是否发送提示
+    # 稀有抽奖货币；领地超过 25 区块后扩建也使用该货币。
     notify-on-change: true
-    # 自管货币是否提醒增加
-    # 自管货币由服主配置控制，玩家不能关闭
     notify-increase: true
-    # 自管货币是否提醒减少
     notify-decrease: true
-    # 自管货币最低提醒金额
-    # 默认 0 表示只要有变动就提醒
     notify-min-amount: 0
-    # 是否通过 Redis 实时同步本货币
-    # 需要 redis.enabled: true 才会生效
+    realtime-sync: true
+
+  dream_meteor:
+    display-name: 梦幻流星
+    symbol: "✦"
+    starting-balance: 0
+    # 时装家具货币。
+    notify-on-change: true
+    notify-increase: true
+    notify-decrease: true
+    notify-min-amount: 0
+    realtime-sync: true
+
+  mengmeng_gem:
+    display-name: 萌萌宝石
+    symbol: "✧"
+    starting-balance: 0
+    # 赞助货币。
+    notify-on-change: true
+    notify-increase: true
+    notify-decrease: true
+    notify-min-amount: 0
     realtime-sync: true
 
 sync:
